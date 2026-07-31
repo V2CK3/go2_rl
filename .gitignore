@@ -64,3 +64,4 @@ logs/
 videos/
 *.egg-info/
 __pycache__/
+.github
