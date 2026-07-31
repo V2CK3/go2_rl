@@ -269,6 +269,24 @@ class LeggedRobot(BaseTask):
             rew = self._reward_termination() * self.reward_scales["termination"]
             self.rew_buf += rew
             self.episode_sums["termination"] += rew
+            
+    def create_sim(self):
+        """Creates simulation, terrain and environments."""
+        self.up_axis_idx = 2  # 2 for z, 1 for y
+        self.sim = self.gym.create_sim(
+            self.sim_device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
+        mesh_type = self.cfg.terrain.mesh_type
+        if mesh_type in ['heightfield', 'trimesh']:
+            self.terrain = Terrain(self.cfg.terrain, self.num_envs)
+        if mesh_type == 'plane':
+            self._create_ground_plane()
+        elif mesh_type == 'heightfield':
+            self._create_heightfield()
+        elif mesh_type == 'trimesh':
+            self._create_trimesh()
+        elif mesh_type is not None:
+            raise ValueError("Terrain mesh type not recognised. Allowed types are [None, plane, heightfield, trimesh]")
+        self._create_envs()
 
     def set_camera(self, position, lookat):
         """ Set camera position and direction

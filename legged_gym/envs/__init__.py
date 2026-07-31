@@ -28,14 +28,11 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
-from .base.legged_robot import LeggedRobot
-from .zqsa01.zqsa01 import ZqSA01
-from .zqsa01.zqsa01_config import ZqSA01Cfg, ZqSA01CfgPPO
-
 import os
-
+from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from legged_gym.utils.task_registry import task_registry
 
-task_registry.register("zqsa01", ZqSA01, ZqSA01Cfg(), ZqSA01CfgPPO())
+from legged_gym.envs.go2.go2_base import Go2Base
+from legged_gym.envs.go2.go2_base_config import Go2BaseCfg,Go2BaseCfgPPO
+task_registry.register("go2", Go2Base, Go2BaseCfg(), Go2BaseCfgPPO())
 
