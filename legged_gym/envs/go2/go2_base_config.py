@@ -7,7 +7,7 @@ class Go2BaseCfg(BaseConfig):
         short_frame_stack = 4
         frame_stack = 10
         c_frame_stack = 3
-        num_envs = 2048
+        num_envs = 4096
         num_single_obs = 47
         num_observations = int(frame_stack * num_single_obs)
         single_num_privileged_obs = 68
@@ -282,7 +282,7 @@ class Go2BaseCfgPPO(BaseConfig):
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 24
-        max_iterations = 15000
+        max_iterations = 1500
         save_interval = 100
         experiment_name = 'go2_base'
         run_name = 'demo'
