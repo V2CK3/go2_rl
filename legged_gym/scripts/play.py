@@ -84,9 +84,11 @@ def play(args):
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     env.set_camera(env_cfg.viewer.pos, env_cfg.viewer.lookat)
 
-    # load policy
+    # load policy (no new log dir during play)
     train_cfg.runner.resume = True
-    ppo_runner, train_cfg, _ = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+    ppo_runner, train_cfg, _ = task_registry.make_alg_runner(
+        env=env, name=args.task, args=args, train_cfg=train_cfg, log_root=None
+    )
     policy = ppo_runner.get_inference_policy(device=env.device)
     
     # export policy as a jit module (used to run it from C++)

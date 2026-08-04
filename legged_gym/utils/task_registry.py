@@ -169,6 +169,8 @@ class TaskRegistry():
             log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
             log_dir = os.path.join(log_root, current_date_time_str + '_' + train_cfg.runner.run_name)
         elif log_root is None:
+            # No new run folder (used by play). Still know where checkpoints live.
+            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
             log_dir = None
         else:
             log_dir = os.path.join(log_root, current_date_time_str + '_' +train_cfg.runner.run_name)
@@ -188,7 +190,8 @@ class TaskRegistry():
         train_cfg_dict = class_to_dict(train_cfg)
         env_cfg_dict = class_to_dict(self.env_cfg_for_wandb)
         all_cfg = {**train_cfg_dict, **env_cfg_dict}
-        _save_run_config(log_dir, all_cfg)
+        if log_dir is not None:
+            _save_run_config(log_dir, all_cfg)
 
         runner_class = eval(train_cfg_dict["runner_class_name"])
         runner = runner_class(env, all_cfg, log_dir, device=args.rl_device)
