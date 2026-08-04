@@ -42,52 +42,13 @@ import torch
 from tqdm import tqdm
 from datetime import datetime
 
-import pygame
-from threading import Thread
 
-x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
-x_vel_max, y_vel_max, yaw_vel_max = 1.5, 1.0, 3.0
-
-joystick_use = True
-joystick_opened = False
-
-if joystick_use:
-
-    pygame.init()
-
-    try:
-        joystick = pygame.joystick.Joystick(0)
-        joystick.init()
-        joystick_opened = True
-    except Exception as e:
-        print(f"cannot open joystick device:{e}")
-
-    exit_flag = False
-
-    def handle_joystick_input():
-        global exit_flag, x_vel_cmd, y_vel_cmd, yaw_vel_cmd
-        
-        while not exit_flag:
-            pygame.event.get()
-
-            x_vel_cmd = -joystick.get_axis(1) * x_vel_max
-            y_vel_cmd = -joystick.get_axis(0) * y_vel_max
-            yaw_vel_cmd = -joystick.get_axis(3) * yaw_vel_max
-
-            pygame.time.delay(100)
-
-        # launch gamepad thread
-    if joystick_opened and joystick_use:
-        joystick_thread = Thread(target=handle_joystick_input)
-        joystick_thread.start()
 
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
 
     # override some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 50)
-    env_cfg.terrain.mesh_type = 'plane'
-    # env_cfg.terrain.mesh_type = 'trimesh'
     env_cfg.terrain.num_rows = 5
     env_cfg.terrain.num_cols = 5
     env_cfg.terrain.curriculum = False     
@@ -117,6 +78,7 @@ def play(args):
 
     train_cfg.seed = 123145
     print("train_cfg.runner_class_name:", train_cfg.runner_class_name)
+    print(f"play terrain.mesh_type={env_cfg.terrain.mesh_type}")
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -145,14 +107,11 @@ def play(args):
         camera_properties.height = 1080
         h1 = env.gym.create_camera_sensor(env.envs[0], camera_properties)
         camera_offset = gymapi.Vec3(1, -1, 0.5)
-        camera_rotation = gymapi.Quat.from_axis_angle(gymapi.Vec3(-0.3, 0.2, 1),
-                                                    np.deg2rad(135))
+        camera_rotation = gymapi.Quat.from_axis_angle(gymapi.Vec3(-0.3, 0.2, 1), np.deg2rad(135))
         actor_handle = env.gym.get_actor_handle(env.envs[0], 0)
         body_handle = env.gym.get_actor_rigid_body_handle(env.envs[0], actor_handle, 0)
-        env.gym.attach_camera_to_body(
-            h1, env.envs[0], body_handle,
-            gymapi.Transform(camera_offset, camera_rotation),
-            gymapi.FOLLOW_POSITION)
+        env.gym.attach_camera_to_body( h1, env.envs[0], body_handle,
+            gymapi.Transform(camera_offset, camera_rotation), gymapi.FOLLOW_POSITION)
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         video_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'videos')
@@ -169,19 +128,7 @@ def play(args):
     np.set_printoptions(formatter={'float': '{:0.4f}'.format})
     for i in range(stop_state_log):
         actions = policy(obs.detach()) # * 0.
-    
-        if FIX_COMMAND:
-            env.commands[:, 0] = 0.5    # 1.0
-            env.commands[:, 1] = 0.
-            env.commands[:, 2] = 0.
-            env.commands[:, 3] = 0.
-            
-        else:
-            env.commands[:, 0] = x_vel_cmd
-            env.commands[:, 1] = y_vel_cmd
-            env.commands[:, 2] = yaw_vel_cmd
-            env.commands[:, 3] = 0.
-        
+
         obs, critic_obs, rews, dones, infos = env.step(actions.detach())
 
         if RENDER:
@@ -278,6 +225,5 @@ def play(args):
 if __name__ == '__main__':
     EXPORT_POLICY = True
     RENDER = False
-    FIX_COMMAND = False # whether to use joystick to control the robot
     args = get_args()
     play(args)
