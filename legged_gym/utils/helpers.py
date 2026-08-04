@@ -105,9 +105,23 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
         runs = os.listdir(root)
         #TODO sort by date to handle change of month
         runs.sort()
-        if 'exported' in runs: runs.remove('exported')
+        # Skip export folders and dirs that have no checkpoints (e.g. a fresh play log_dir).
+        skip_names = {"exported", "0_exported"}
+        runs = [
+            r for r in runs
+            if r not in skip_names
+            and os.path.isdir(os.path.join(root, r))
+            and any(
+                f.startswith("model") and f.endswith(".pt")
+                for f in os.listdir(os.path.join(root, r))
+            )
+        ]
+        if len(runs) == 0:
+            raise ValueError("No runs with model_*.pt in this directory: " + root)
         last_run = os.path.join(root, runs[-1])
-    except:
+    except ValueError:
+        raise
+    except Exception:
         raise ValueError("No runs in this directory: " + root)
     if load_run==-1:
         load_run = last_run
@@ -115,8 +129,10 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
         load_run = os.path.join(root, load_run)
 
     if checkpoint==-1:
-        models = [file for file in os.listdir(load_run) if 'model' in file]
+        models = [file for file in os.listdir(load_run) if file.startswith("model") and file.endswith(".pt")]
         models.sort(key=lambda m: '{0:0>15}'.format(m))
+        if len(models) == 0:
+            raise ValueError(f"No model_*.pt checkpoints in: {load_run}")
         model = models[-1]
     else:
         model = "model_{}.pt".format(checkpoint) 
