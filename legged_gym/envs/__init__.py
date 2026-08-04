@@ -33,6 +33,10 @@ from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from legged_gym.utils.task_registry import task_registry
 
 from legged_gym.envs.go2.go2_base import Go2Base
-from legged_gym.envs.go2.go2_base_config import Go2BaseCfg,Go2BaseCfgPPO
+from legged_gym.envs.go2.go2_base_config import Go2BaseCfg, Go2BaseCfgPPO
+from legged_gym.envs.go2.go2_stairs import Go2Stairs
+from legged_gym.envs.go2.go2_stairs_config import Go2StairsCfg, Go2StairsCfgPPO
+
 task_registry.register("go2", Go2Base, Go2BaseCfg(), Go2BaseCfgPPO())
+task_registry.register("go2_stairs", Go2Stairs, Go2StairsCfg(), Go2StairsCfgPPO())
 

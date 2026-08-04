@@ -210,7 +210,7 @@ class PPO:
 
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
-                mean_sym_loss += sym_loss.item()
+                mean_sym_loss += sym_loss.item() if torch.is_tensor(sym_loss) else sym_loss
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
