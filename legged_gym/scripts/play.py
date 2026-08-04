@@ -39,7 +39,6 @@ from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Log
 from isaacgym.torch_utils import *
 
 import torch
-from tqdm import tqdm
 from datetime import datetime
 
 
@@ -100,9 +99,9 @@ def play(args):
         print('Exported policy as jit script to: ', path)
 
     logger = Logger(env_cfg.sim.dt)
-    robot_index = 0 # which robot is used for logging
-    joint_index = 5 # which joint is used for logging
-    stop_state_log = 1000 # number of steps before plotting states
+    robot_index = 0
+    stop_state_log = 1000  # steps to record before plot_states
+    plots_done = False
     if RENDER:
         camera_properties = gymapi.CameraProperties()
         camera_properties.width = 1920
@@ -112,25 +111,26 @@ def play(args):
         camera_rotation = gymapi.Quat.from_axis_angle(gymapi.Vec3(-0.3, 0.2, 1), np.deg2rad(135))
         actor_handle = env.gym.get_actor_handle(env.envs[0], 0)
         body_handle = env.gym.get_actor_rigid_body_handle(env.envs[0], actor_handle, 0)
-        env.gym.attach_camera_to_body( h1, env.envs[0], body_handle,
-            gymapi.Transform(camera_offset, camera_rotation), gymapi.FOLLOW_POSITION)
+        env.gym.attach_camera_to_body(
+            h1, env.envs[0], body_handle,
+            gymapi.Transform(camera_offset, camera_rotation),
+            gymapi.FOLLOW_POSITION,
+        )
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         video_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'videos')
         experiment_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'videos', train_cfg.runner.experiment_name)
-        dir = os.path.join(experiment_dir, datetime.now().strftime('%b%d_%H-%M-%S')+ args.run_name + '.mp4')
+        dir = os.path.join(experiment_dir, datetime.now().strftime('%b%d_%H-%M-%S') + args.run_name + '.mp4')
         if not os.path.exists(video_dir):
-            os.makedirs(video_dir,exist_ok=True)
+            os.makedirs(video_dir, exist_ok=True)
         if not os.path.exists(experiment_dir):
-            os.makedirs(experiment_dir,exist_ok=True)
+            os.makedirs(experiment_dir, exist_ok=True)
         video = cv2.VideoWriter(dir, fourcc, 50.0, (1920, 1080))
-    
+
     obs = env.get_observations()
-
-    np.set_printoptions(formatter={'float': '{:0.4f}'.format})
-    for i in range(stop_state_log):
-        actions = policy(obs.detach()) # * 0.
-
+    i = 0
+    while True:
+        actions = policy(obs.detach())
         obs, critic_obs, rews, dones, infos = env.step(actions.detach())
 
         if RENDER:
@@ -142,90 +142,48 @@ def play(args):
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
             video.write(img[..., :3])
 
-        if i < stop_state_log:
+        if PLOT_STATES and i < stop_state_log:
+            # One GPU sync batch for the logged robot (avoids dozens of .item() stalls).
+            ri = robot_index
+            act = actions[ri].detach().cpu().numpy()
+            dof_pos = env.dof_pos[ri].detach().cpu().numpy()
+            dof_vel = env.dof_vel[ri].detach().cpu().numpy()
+            torques = env.torques[ri].detach().cpu().numpy()
+            commands = env.commands[ri, :3].detach().cpu().numpy()
+            base_lin = env.base_lin_vel[ri].detach().cpu().numpy()
+            base_ang_yaw = env.base_ang_vel[ri, 2].detach().cpu().item()
+            contact_z = env.contact_forces[ri, env.feet_indices, 2].detach().cpu().numpy()
+            joint_idx = 0
             logger.log_states(
                 {
-                    'dof_pos_target': actions[robot_index, 0].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[0]': actions[robot_index, 0].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[1]': actions[robot_index, 1].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[2]': actions[robot_index, 2].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[3]': actions[robot_index, 3].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[4]': actions[robot_index, 4].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[5]': actions[robot_index, 5].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[6]': actions[robot_index, 6].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[7]': actions[robot_index, 7].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[8]': actions[robot_index, 8].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[9]': actions[robot_index, 9].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[10]': actions[robot_index,10].item() * env.cfg.control.action_scale,
-                    'dof_pos_target[11]': actions[robot_index, 11].item() * env.cfg.control.action_scale,
-                    'dof_pos': env.dof_pos[robot_index, 0].item(),
-                    'dof_pos[0]': env.dof_pos[robot_index, 0].item(),
-                    'dof_pos[1]': env.dof_pos[robot_index, 1].item(),
-                    'dof_pos[2]': env.dof_pos[robot_index, 2].item(),
-                    'dof_pos[3]': env.dof_pos[robot_index, 3].item(),
-                    'dof_pos[4]': env.dof_pos[robot_index, 4].item(),
-                    'dof_pos[5]': env.dof_pos[robot_index, 5].item(),
-                    'dof_pos[6]': env.dof_pos[robot_index, 6].item(),
-                    'dof_pos[7]': env.dof_pos[robot_index, 7].item(),
-                    'dof_pos[8]': env.dof_pos[robot_index, 8].item(),
-                    'dof_pos[9]': env.dof_pos[robot_index, 9].item(),
-                    'dof_pos[10]': env.dof_pos[robot_index, 10].item(),
-                    'dof_pos[11]': env.dof_pos[robot_index, 11].item(),
-                    'dof_torque': env.torques[robot_index, 0].item(),
-                    'dof_torque[0]': env.torques[robot_index, 0].item(),
-                    'dof_torque[1]': env.torques[robot_index, 1].item(),
-                    'dof_torque[2]': env.torques[robot_index, 2].item(),
-                    'dof_torque[3]': env.torques[robot_index, 3].item(),
-                    'dof_torque[4]': env.torques[robot_index, 4].item(),
-                    'dof_torque[5]': env.torques[robot_index, 5].item(),
-                    'dof_torque[6]': env.torques[robot_index, 6].item(),
-                    'dof_torque[7]': env.torques[robot_index, 7].item(),
-                    'dof_torque[8]': env.torques[robot_index, 8].item(),
-                    'dof_torque[9]': env.torques[robot_index, 9].item(),
-                    'dof_torque[10]': env.torques[robot_index, 10].item(),
-                    'dof_torque[11]': env.torques[robot_index, 11].item(),
-                    'dof_vel': env.dof_vel[robot_index, 0].item(),
-                    'dof_vel[0]': env.dof_vel[robot_index, 0].item(),
-                    'dof_vel[1]': env.dof_vel[robot_index, 1].item(),
-                    'dof_vel[2]': env.dof_vel[robot_index, 2].item(),
-                    'dof_vel[3]': env.dof_vel[robot_index, 3].item(),
-                    'dof_vel[4]': env.dof_vel[robot_index, 4].item(),
-                    'dof_vel[5]': env.dof_vel[robot_index, 5].item(),
-                    'dof_vel[6]': env.dof_vel[robot_index, 6].item(),
-                    'dof_vel[7]': env.dof_vel[robot_index, 7].item(),
-                    'dof_vel[8]': env.dof_vel[robot_index, 8].item(),
-                    'dof_vel[9]': env.dof_vel[robot_index, 9].item(),
-                    'dof_vel[10]': env.dof_vel[robot_index, 10].item(),
-                    'dof_vel[11]': env.dof_vel[robot_index, 11].item(),
-                    'command_x': env.commands[robot_index, 0].item(),
-                    'command_y': env.commands[robot_index, 1].item(),
-                    'command_yaw': env.commands[robot_index, 2].item(),
-                    'base_vel_x': env.base_lin_vel[robot_index, 0].item(),
-                    'base_vel_y': env.base_lin_vel[robot_index, 1].item(),
-                    'base_vel_z': env.base_lin_vel[robot_index, 2].item(),
-                    'base_vel_yaw': env.base_ang_vel[robot_index, 2].item(),
-                    'contact_forces_z': env.contact_forces[robot_index, env.feet_indices, 2].cpu().numpy()
+                    'dof_pos_target': float(act[joint_idx] * env.cfg.control.action_scale),
+                    'dof_pos': float(dof_pos[joint_idx]),
+                    'dof_vel': float(dof_vel[joint_idx]),
+                    'dof_torque': float(torques[joint_idx]),
+                    'command_x': float(commands[0]),
+                    'command_y': float(commands[1]),
+                    'command_yaw': float(commands[2]),
+                    'base_vel_x': float(base_lin[0]),
+                    'base_vel_y': float(base_lin[1]),
+                    'base_vel_z': float(base_lin[2]),
+                    'base_vel_yaw': float(base_ang_yaw),
+                    'contact_forces_z': contact_z,
                 }
-                )
-            
-        elif i == stop_state_log:
-            logger.plot_states()
+            )
+        elif PLOT_STATES and (not plots_done) and i == stop_state_log:
+            # Shared Logger.plot_states (async window so Isaac Gym keeps running).
+            logger.plot_states(show=True, async_show=True)
+            plots_done = True
 
-        if infos["episode"]:
-            num_episodes = torch.sum(env.reset_buf).item()
-            if num_episodes>0:
-                logger.log_rewards(infos["episode"], num_episodes)
-
-    # logger.print_rewards()
-    
-    while True:
-        True
+        i += 1
 
     if RENDER:
         video.release()
 
+
 if __name__ == '__main__':
     EXPORT_POLICY = True
     RENDER = False
+    PLOT_STATES = False  # True: record then Logger.plot_states(); avoid during interactive play if possible
     args = get_args()
     play(args)

@@ -6,7 +6,6 @@ import time
 import importlib.util
 from datetime import datetime
 import numpy as np
-import matplotlib.pyplot as plt
 import mujoco
 import mujoco.viewer
 from collections import deque
@@ -253,80 +252,45 @@ def get_foot_contact_forces_z(model, data):
     return forces_z
 
 
-def save_state_plots(logger, save_dir, dt):
-    """Save sim2sim state figures with clear axes to save_dir."""
-    os.makedirs(save_dir, exist_ok=True)
-    log = logger.state_log
-    if not log or not log.get('base_vel_x'):
-        print(f'No state log to plot; skip saving under {save_dir}')
-        return
-
-    n = len(log['base_vel_x'])
-    t = np.linspace(0.0, n * dt, n)
-
-    plt.rcParams.update({
-        'font.size': 11,
-        'axes.labelsize': 12,
-        'axes.titlesize': 13,
-        'legend.fontsize': 9,
-        'xtick.labelsize': 10,
-        'ytick.labelsize': 10,
-        'axes.grid': True,
-        'grid.alpha': 0.3,
+def _update_eval_results(run_dir, plot_path, metrics, status='pass'):
+    """Merge sim2sim results into run_dir/eval_results.json."""
+    import json
+    path = os.path.join(run_dir, 'eval_results.json')
+    data = {}
+    if os.path.isfile(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    sim2sim = data.get('sim2sim', {})
+    plots = list(sim2sim.get('plots') or [])
+    rel = os.path.relpath(plot_path, run_dir) if plot_path else None
+    if rel and rel not in plots:
+        plots.append(rel)
+    sim2sim.update({
+        'status': status,
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'plots': plots,
+        'metrics': {**(sim2sim.get('metrics') or {}), **(metrics or {})},
     })
-
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    foot_labels = list(FOOT_GEOM_NAMES)
-    forces = np.asarray(log['contact_forces_z'], dtype=np.double)
-    if forces.ndim == 1:
-        forces = forces.reshape(-1, 1)
-
-    def _style(ax, xlabel, ylabel, title):
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.legend(loc='best')
-        ax.tick_params(axis='both', which='major', length=4, width=1)
-
-    fig, axs = plt.subplots(3, 3, figsize=(14, 10))
-    axs[0, 0].plot(t, log['base_vel_x'], label='measured')
-    axs[0, 0].plot(t, log['command_x'], '--', label='command')
-    _style(axs[0, 0], 'time [s]', 'vx [m/s]', 'Base vel X')
-
-    axs[0, 1].plot(t, log['base_vel_y'], label='measured')
-    axs[0, 1].plot(t, log['command_y'], '--', label='command')
-    _style(axs[0, 1], 'time [s]', 'vy [m/s]', 'Base vel Y')
-
-    axs[0, 2].plot(t, log['base_vel_yaw'], label='measured')
-    axs[0, 2].plot(t, log['command_yaw'], '--', label='command')
-    _style(axs[0, 2], 'time [s]', 'yaw [rad/s]', 'Base vel Yaw')
-
-    axs[1, 0].plot(t, log['dof_pos'], label='measured')
-    axs[1, 0].plot(t, log['dof_pos_target'], '--', label='target')
-    _style(axs[1, 0], 'time [s]', 'pos [rad]', 'DOF position')
-
-    axs[1, 1].plot(t, log['dof_vel'], label='measured')
-    _style(axs[1, 1], 'time [s]', 'vel [rad/s]', 'DOF velocity')
-
-    axs[1, 2].plot(t, log['dof_torque'], label='measured')
-    _style(axs[1, 2], 'time [s]', 'torque [N·m]', 'Torque')
-
-    for i in range(forces.shape[1]):
-        label = foot_labels[i] if i < len(foot_labels) else f'foot_{i}'
-        axs[2, 0].plot(t[:forces.shape[0]], forces[:, i], label=label)
-    _style(axs[2, 0], 'time [s]', 'Fz [N]', 'Contact Fz')
-
-    axs[2, 1].plot(log['dof_vel'], log['dof_torque'], 'x', markersize=2, label='measured')
-    _style(axs[2, 1], 'joint vel [rad/s]', 'torque [N·m]', 'Torque / velocity')
-
-    axs[2, 2].plot(t, log['base_vel_z'], label='measured')
-    _style(axs[2, 2], 'time [s]', 'vz [m/s]', 'Base vel Z')
-
-    fig.tight_layout()
-    path = os.path.join(save_dir, f'result_{stamp}.png')
-    fig.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f'Saved sim2sim plot: {path}')
+    data['sim2sim'] = sim2sim
+    data.setdefault('summary', '')
+    data.setdefault('findings', [])
+    data.setdefault('sim2real', {
+        'status': 'pending',
+        'date': '',
+        'result': '',
+        'problems': '',
+        'solutions': '',
+        'notes': '',
+        'videos': [],
+        'images': [],
+        'metrics': {},
+    })
+    for key in ('result', 'problems', 'solutions', 'notes'):
+        sim2sim.setdefault(key, '')
+    data['sim2sim'] = sim2sim
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f'Updated eval results: {path}')
 
 
 def pd_control(target_q, q, kp, target_dq, dq, kd, cfg):
@@ -334,8 +298,9 @@ def pd_control(target_q, q, kp, target_dq, dq, kd, cfg):
     return (target_q + cfg.robot_config.default_dof_pos - q) * kp + (target_dq - dq) * kd
 
 
-def run_mujoco(policy, cfg, commander=None):
+def run_mujoco(policy, cfg, commander=None, plot_dir=None, run_dir=None):
     commander = commander or KeyboardCommander()
+    plot_dir = plot_dir or SIM2SIM_PLOT_DIR
 
     model = mujoco.MjModel.from_xml_path(cfg.sim_config.mujoco_model_path)
     model.opt.timestep = cfg.sim_config.dt
@@ -508,7 +473,11 @@ def run_mujoco(policy, cfg, commander=None):
                     'dof_vel[11]': dq[11].item(),
                 })
             elif step_i == stop_state_log:
-                save_state_plots(logger, SIM2SIM_PLOT_DIR, cfg.sim_config.dt)
+                plot_path = logger.plot_states(
+                    save_dir=plot_dir, show=False, foot_labels=FOOT_GEOM_NAMES
+                )
+                if run_dir and plot_path:
+                    _update_eval_results(run_dir, plot_path, logger.compute_tracking_metrics())
                 plots_saved = True
 
             step_i += 1
@@ -518,13 +487,35 @@ def run_mujoco(policy, cfg, commander=None):
                 time.sleep(time_until_next)
 
         # Save on early exit (window closed before stop_state_log)
-        if (not plots_saved) and len(logger.state_log.get('base_vel_x', [])) > 0:
-            save_state_plots(logger, SIM2SIM_PLOT_DIR, cfg.sim_config.dt)
+        if (not plots_saved) and logger.num_state_steps() > 0:
+            plot_path = logger.plot_states(
+                save_dir=plot_dir, show=False, foot_labels=FOOT_GEOM_NAMES
+            )
+            if run_dir and plot_path:
+                _update_eval_results(run_dir, plot_path, logger.compute_tracking_metrics())
 
 
 if __name__ == '__main__':
-    load_model = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', 'go2_base', '0_exported', 'policies', 'policy_1.pt')
-    use_terrain = False
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Go2 MuJoCo sim2sim')
+    parser.add_argument('--experiment', default='go2_base', help='Experiment name under logs/')
+    parser.add_argument('--run', default=None, help='Training run dir name; links plots into eval_results.json')
+    parser.add_argument('--policy', default=None, help='Path to TorchScript policy (.pt)')
+    parser.add_argument('--terrain', action='store_true', help='Use terrain MuJoCo scene')
+    args = parser.parse_args()
+
+    use_terrain = args.terrain
+    load_model = args.policy or os.path.join(
+        LEGGED_GYM_ROOT_DIR, 'logs', args.experiment, '0_exported', 'policies', 'policy_1.pt'
+    )
+
+    run_dir = None
+    plot_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', args.experiment, '0_exported', 'sim2sim')
+    if args.run:
+        run_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', args.experiment, args.run)
+        plot_dir = os.path.join(run_dir, 'sim2sim')
+        os.makedirs(run_dir, exist_ok=True)
 
     class Sim2simCfg:
         """Self-contained cfg (mirrors Go2BaseCfg fields used by sim2sim)."""
@@ -576,6 +567,9 @@ if __name__ == '__main__':
 
     print(f"Loading policy: {load_model}")
     print(f"MuJoCo model: {Sim2simCfg.sim_config.mujoco_model_path}")
+    print(f"Plot dir: {plot_dir}")
+    if run_dir:
+        print(f"Linked run dir: {run_dir}")
 
     policy = torch.jit.load(load_model)
-    run_mujoco(policy, Sim2simCfg(), commander=KeyboardCommander())
+    run_mujoco(policy, Sim2simCfg(), commander=KeyboardCommander(), plot_dir=plot_dir, run_dir=run_dir)
