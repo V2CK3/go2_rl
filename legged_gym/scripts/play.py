@@ -39,8 +39,6 @@ from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Log
 from isaacgym.torch_utils import *
 
 import torch
-from datetime import datetime
-
 
 
 def play(args):
@@ -91,60 +89,23 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     
     # export policy as a jit module (used to run it from C++)
-    current_date_str = datetime.now().strftime('%Y-%m-%d')
-    current_time_str = datetime.now().strftime('%H-%M-%S')
     if EXPORT_POLICY:
         path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, '0_exported', 'policies')
         export_policy_as_jit(ppo_runner.alg.actor_critic, path)
         print('Exported policy as jit script to: ', path)
 
     logger = Logger(env_cfg.sim.dt)
-    robot_index = 0
-    stop_state_log = 1000  # steps to record before plot_states
-    plots_done = False
-    if RENDER:
-        camera_properties = gymapi.CameraProperties()
-        camera_properties.width = 1920
-        camera_properties.height = 1080
-        h1 = env.gym.create_camera_sensor(env.envs[0], camera_properties)
-        camera_offset = gymapi.Vec3(1, -1, 0.5)
-        camera_rotation = gymapi.Quat.from_axis_angle(gymapi.Vec3(-0.3, 0.2, 1), np.deg2rad(135))
-        actor_handle = env.gym.get_actor_handle(env.envs[0], 0)
-        body_handle = env.gym.get_actor_rigid_body_handle(env.envs[0], actor_handle, 0)
-        env.gym.attach_camera_to_body(
-            h1, env.envs[0], body_handle,
-            gymapi.Transform(camera_offset, camera_rotation),
-            gymapi.FOLLOW_POSITION,
-        )
-
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        video_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'videos')
-        experiment_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'videos', train_cfg.runner.experiment_name)
-        dir = os.path.join(experiment_dir, datetime.now().strftime('%b%d_%H-%M-%S') + args.run_name + '.mp4')
-        if not os.path.exists(video_dir):
-            os.makedirs(video_dir, exist_ok=True)
-        if not os.path.exists(experiment_dir):
-            os.makedirs(experiment_dir, exist_ok=True)
-        video = cv2.VideoWriter(dir, fourcc, 50.0, (1920, 1080))
+    log_robot_index = 0
+    stop_log_steps = 1000  # steps to record before plot_states
 
     obs = env.get_observations()
     i = 0
     while True:
         actions = policy(obs.detach())
-        obs, critic_obs, rews, dones, infos = env.step(actions.detach())
+        obs, _, _, _, _ = env.step(actions.detach())
 
-        if RENDER:
-            env.gym.fetch_results(env.sim, True)
-            env.gym.step_graphics(env.sim)
-            env.gym.render_all_camera_sensors(env.sim)
-            img = env.gym.get_camera_image(env.sim, env.envs[0], h1, gymapi.IMAGE_COLOR)
-            img = np.reshape(img, (1080, 1920, 4))
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            video.write(img[..., :3])
-
-        if PLOT_STATES and i < stop_state_log:
-            # One GPU sync batch for the logged robot (avoids dozens of .item() stalls).
-            ri = robot_index
+        if PLOT_STATES and i < stop_log_steps:
+            ri = log_robot_index
             act = actions[ri].detach().cpu().numpy()
             dof_pos = env.dof_pos[ri].detach().cpu().numpy()
             dof_vel = env.dof_vel[ri].detach().cpu().numpy()
@@ -170,20 +131,20 @@ def play(args):
                     'contact_forces_z': contact_z,
                 }
             )
-        elif PLOT_STATES and (not plots_done) and i == stop_state_log:
-            # Shared Logger.plot_states (async window so Isaac Gym keeps running).
-            logger.plot_states(show=True, async_show=True)
-            plots_done = True
-
+        elif PLOT_STATES and i == stop_log_steps:
+            path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, '0_exported', 'sim2play')
+            logger.plot_states(show=True, async_show=True,save_dir=path)
         i += 1
-
-    if RENDER:
-        video.release()
 
 
 if __name__ == '__main__':
     EXPORT_POLICY = True
-    RENDER = False
-    PLOT_STATES = False  # True: record then Logger.plot_states(); avoid during interactive play if possible
+    PLOT_STATES = True
+
     args = get_args()
+    args.task = "go2_stairs"
+    args.load_run = -1
+    args.checkpoint = -1
+    # args.num_envs = 
+
     play(args)

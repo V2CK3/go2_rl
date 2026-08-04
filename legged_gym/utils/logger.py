@@ -225,7 +225,7 @@ class Logger:
             if fig is None:
                 return None
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            name = filename or f"result_{stamp}.png"
+            name = filename or f"play_{stamp}.png"
             saved_path = os.path.join(save_dir, name)
             fig.savefig(saved_path, dpi=dpi, bbox_inches="tight")
             plt.close(fig)
