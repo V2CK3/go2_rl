@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import json
 import os
 from datetime import datetime
 from typing import Tuple
@@ -40,6 +41,32 @@ from rsl_rl.runners import OnPolicyRunner
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobotCfgPPO
+
+
+def _jsonable(obj):
+    """Convert nested config dicts to JSON-serializable values."""
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(x) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.integer)):
+        return obj.item()
+    return str(obj)
+
+
+def _save_run_config(log_dir, all_cfg):
+    """Persist merged train+env config next to TensorBoard events."""
+    if log_dir is None:
+        return
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, "config.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(_jsonable(all_cfg), f, indent=2, ensure_ascii=False)
+    print(f"Saved run config: {path}")
 
 class TaskRegistry():
     def __init__(self):
@@ -146,18 +173,26 @@ class TaskRegistry():
         else:
             log_dir = os.path.join(log_root, current_date_time_str + '_' +train_cfg.runner.run_name)
         
+        # Resolve resume checkpoint BEFORE creating a new log_dir, otherwise a
+        # fresh empty play/train folder can be mistaken for the latest run.
+        resume = train_cfg.runner.resume
+        resume_path = None
+        if resume:
+            resume_path = get_load_path(
+                log_root,
+                load_run=train_cfg.runner.load_run,
+                checkpoint=train_cfg.runner.checkpoint,
+            )
+            print(f"Loading model from: {resume_path}")
+
         train_cfg_dict = class_to_dict(train_cfg)
         env_cfg_dict = class_to_dict(self.env_cfg_for_wandb)
         all_cfg = {**train_cfg_dict, **env_cfg_dict}
-        
+        _save_run_config(log_dir, all_cfg)
+
         runner_class = eval(train_cfg_dict["runner_class_name"])
         runner = runner_class(env, all_cfg, log_dir, device=args.rl_device)
-        #save resume path before creating a new log_dir
-        resume = train_cfg.runner.resume
-        if resume:
-            # load previously trained model
-            resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
-            print(f"Loading model from: {resume_path}")
+        if resume_path is not None:
             runner.load(resume_path, load_optimizer=False)
 
         print("log_dir: ", log_dir)
