@@ -29,11 +29,12 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 from __future__ import annotations
 
+import math
 import os
 from collections import defaultdict
 from datetime import datetime
 from multiprocessing import Process
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,11 +43,34 @@ import numpy as np
 DEFAULT_FOOT_LABELS = ("FL", "FR", "RL", "RR")
 
 
-def _has(log: Dict[str, list], key: str) -> bool:
+TB_PLOT_GROUPS = (
+    ("Episode", "tb_reward"),
+    ("Loss", "tb_loss"),
+    ("Train", "tb_train"),
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _has(log: Dict[str, Any], key: str) -> bool:
     return bool(log.get(key))
 
 def _as_1d(values) -> np.ndarray:
     return np.asarray(values, dtype=np.float64).reshape(-1)
+
+def _apply_plot_rc(font_size: int = 11) -> None:
+    plt.rcParams.update(
+        {
+            "font.size": font_size,
+            "axes.labelsize": font_size + 1,
+            "axes.titlesize": font_size + 1,
+            "legend.fontsize": max(font_size - 2, 8),
+            "xtick.labelsize": max(font_size - 1, 8),
+            "ytick.labelsize": max(font_size - 1, 8),
+        }
+    )
 
 def _style(ax, xlabel: str, ylabel: str, title: str) -> None:
     ax.set_xlabel(xlabel)
@@ -56,62 +80,111 @@ def _style(ax, xlabel: str, ylabel: str, title: str) -> None:
     ax.grid(True, alpha=0.3)
     ax.tick_params(axis="both", which="major", length=4, width=1)
 
-def build_state_figure( log: Dict[str, list], dt: float, foot_labels: Sequence[str] = DEFAULT_FOOT_LABELS):
+def _make_axes_grid(n: int, ncols: int = 3, cell_size: Tuple[float, float] = (4.2, 2.8)):
+    """Create a nrows x ncols axes grid; unused cells are turned off by caller."""
+    ncols = max(1, min(ncols, n))
+    nrows = int(math.ceil(n / ncols))
+    fig, axs = plt.subplots(
+        nrows, ncols,
+        figsize=(cell_size[0] * ncols, max(cell_size[1], cell_size[1] * nrows)),
+        squeeze=False,
+    )
+    return fig, axs, nrows, ncols
+
+def _hide_unused_axes(axs, n_used: int, nrows: int, ncols: int) -> None:
+    for j in range(n_used, nrows * ncols):
+        r, c = divmod(j, ncols)
+        axs[r, c].axis("off")
+
+def save_figure(
+    fig,
+    save_dir: str,
+    filename: str,
+    dpi: int = 150,
+    layout: bool = True,
+    tight_rect: Optional[Sequence[float]] = None,
+) -> str:
+    """Shared PNG export used by play/sim2sim state plots and TB curve dumps."""
+    os.makedirs(save_dir, exist_ok=True)
+    if layout:
+        if tight_rect is not None:
+            fig.tight_layout(rect=list(tight_rect))
+        else:
+            fig.tight_layout()
+    path = os.path.join(save_dir, filename)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved plot: {path}")
+    return path
+
+
+def _plot_series(
+    ax,
+    x,
+    y_keys: Sequence[Tuple[str, str, str]],
+    log: Dict[str, Any],
+    xlabel: str,
+    ylabel: str,
+    title: str,
+) -> None:
+    """Plot optional (key, style, label) series from ``log`` onto ``ax``."""
+    for key, style, label in y_keys:
+        if _has(log, key):
+            ax.plot(x, log[key], style, label=label)
+    _style(ax, xlabel, ylabel, title)
+
+
+# ---------------------------------------------------------------------------
+# Play / sim2sim state figure
+# ---------------------------------------------------------------------------
+
+def build_state_figure(
+    log: Dict[str, list],
+    dt: float,
+    foot_labels: Sequence[str] = DEFAULT_FOOT_LABELS,
+):
     """Build the shared 3x3 state figure used by play and sim2sim."""
     if not log or not _has(log, "base_vel_x"):
         return None
 
     n = len(log["base_vel_x"])
     t = np.linspace(0.0, n * dt, n)
-
-    plt.rcParams.update(
-        {
-            "font.size": 11,
-            "axes.labelsize": 12,
-            "axes.titlesize": 13,
-            "legend.fontsize": 9,
-            "xtick.labelsize": 10,
-            "ytick.labelsize": 10,
-        }
-    )
-
-    fig, axs = plt.subplots(3, 3, figsize=(14, 10))
+    _apply_plot_rc(11)
+    fig, axs, _, _ = _make_axes_grid(9, ncols=3, cell_size=(14 / 3, 10 / 3))
 
     # Row 0: base velocity tracking
-    if _has(log,"base_vel_x"):
-        axs[0, 0].plot(t, log["base_vel_x"], label="measured")
-    if _has(log, "command_x"):
-        axs[0, 0].plot(t, log["command_x"], "--", label="command")
-    _style(axs[0, 0], "time [s]", "vx [m/s]", "Base vel X")
+    _plot_series(
+        axs[0, 0], t,
+        (("base_vel_x", "-", "measured"), ("command_x", "--", "command")),
+        log, "time [s]", "vx [m/s]", "Base vel X",
+    )
+    _plot_series(
+        axs[0, 1], t,
+        (("base_vel_y", "-", "measured"), ("command_y", "--", "command")),
+        log, "time [s]", "vy [m/s]", "Base vel Y",
+    )
+    _plot_series(
+        axs[0, 2], t,
+        (("base_vel_yaw", "-", "measured"), ("command_yaw", "--", "command")),
+        log, "time [s]", "yaw [rad/s]", "Base vel Yaw",
+    )
 
-    if _has(log, "base_vel_y"):
-        axs[0, 1].plot(t, log["base_vel_y"], label="measured")
-    if _has(log, "command_y"):
-        axs[0, 1].plot(t, log["command_y"], "--", label="command")
-    _style(axs[0, 1], "time [s]", "vy [m/s]", "Base vel Y")
-
-    if _has(log, "base_vel_yaw"):
-        axs[0, 2].plot(t, log["base_vel_yaw"], label="measured")
-    if _has(log, "command_yaw"):
-        axs[0, 2].plot(t, log["command_yaw"], "--", label="command")
-    _style(axs[0, 2], "time [s]", "yaw [rad/s]", "Base vel Yaw")
-
-    # Row 1: DOF / torque / vz
-    if _has(log, "dof_pos"):
-        axs[1, 0].plot(t, log["dof_pos"], label="measured")
-    if _has(log, "dof_pos_target"):
-        axs[1, 0].plot(t, log["dof_pos_target"], "--", label="target")
-    _style(axs[1, 0], "time [s]", "pos [rad]", "DOF position")
-
-    if _has(log, "dof_vel"):
-        axs[1, 1].plot(t, log["dof_vel"], label="measured")
-    if _has(log, "dof_vel_target"):
-        axs[1, 1].plot(t, log["dof_vel_target"], "--", label="target")
-    _style(axs[1, 1], "time [s]", "vel [rad/s]", "DOF velocity")
-
-    if _has(log, "dof_torque"):
-        axs[1, 2].plot(t, log["dof_torque"], label="measured")
-    _style(axs[1, 2], "time [s]", "torque [N·m]", "Torque")
+    # Row 1: DOF / torque
+    _plot_series(
+        axs[1, 0], t,
+        (("dof_pos", "-", "measured"), ("dof_pos_target", "--", "target")),
+        log, "time [s]", "pos [rad]", "DOF position",
+    )
+    _plot_series(
+        axs[1, 1], t,
+        (("dof_vel", "-", "measured"), ("dof_vel_target", "--", "target")),
+        log, "time [s]", "vel [rad/s]", "DOF velocity",
+    )
+    _plot_series(
+        axs[1, 2], t,
+        (("dof_torque", "-", "measured"),),
+        log, "time [s]", "torque [N·m]", "Torque",
+    )
 
     # Row 2: contacts / torque-vel / vz
     if _has(log, "contact_forces_z"):
@@ -127,12 +200,137 @@ def build_state_figure( log: Dict[str, list], dt: float, foot_labels: Sequence[s
         axs[2, 1].plot(log["dof_vel"], log["dof_torque"], "x", markersize=2, label="measured")
     _style(axs[2, 1], "joint vel [rad/s]", "torque [N·m]", "Torque / velocity")
 
-    if _has(log, "base_vel_z"):
-        axs[2, 2].plot(t, log["base_vel_z"], label="measured")
-    _style(axs[2, 2], "time [s]", "vz [m/s]", "Base vel Z")
+    _plot_series(
+        axs[2, 2], t,
+        (("base_vel_z", "-", "measured"),),
+        log, "time [s]", "vz [m/s]", "Base vel Z",
+    )
 
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# TensorBoard curve figures
+# ---------------------------------------------------------------------------
+
+def load_tb_scalars(
+    log_dir: str,
+    tags: Optional[Sequence[str]] = None,
+    max_points: int = 2000,
+) -> Dict[str, List[Tuple[int, float]]]:
+    """Load TensorBoard scalar series from a training run directory."""
+    if not log_dir or not os.path.isdir(log_dir):
+        return {}
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    except ImportError:
+        print("tensorboard not installed; skip TB plots.")
+        return {}
+
+    ea = EventAccumulator(log_dir, size_guidance={"scalars": 0})
+    ea.Reload()
+    available = set(ea.Tags().get("scalars", []))
+    wanted = list(tags) if tags is not None else sorted(available)
+    out: Dict[str, List[Tuple[int, float]]] = {}
+    for tag in wanted:
+        if tag not in available:
+            continue
+        events = ea.Scalars(tag)
+        if not events:
+            continue
+        if len(events) > max_points:
+            stride = max(1, len(events) // max_points)
+            events = events[::stride]
+        out[tag] = [(int(e.step), float(e.value)) for e in events]
+    return out
+
+
+def _filter_tb_group(
+    series: Dict[str, List[Tuple[int, float]]],
+    prefix: str,
+) -> Dict[str, List[Tuple[int, float]]]:
+    """Pick tags under ``prefix/``; drop ``*/time`` duplicates for Train."""
+    key = prefix.rstrip("/") + "/"
+    selected = {
+        tag: points
+        for tag, points in series.items()
+        if tag.startswith(key) and not tag.endswith("/time")
+    }
+    return dict(sorted(selected.items()))
+
+
+def build_tb_group_figure(
+    series: Dict[str, List[Tuple[int, float]]],
+    title: str,
+    ncols: int = 3,
+):
+    """Build a multi-subplot figure for one TB tag group."""
+    if not series:
+        return None
+
+    tags = list(series.keys())
+    _apply_plot_rc(10)
+    fig, axs, nrows, ncols = _make_axes_grid(len(tags), ncols=ncols)
+    fig.suptitle(title, fontsize=14)
+
+    for i, tag in enumerate(tags):
+        r, c = divmod(i, ncols)
+        ax = axs[r, c]
+        steps = [p[0] for p in series[tag]]
+        values = [p[1] for p in series[tag]]
+        short = tag.split("/", 1)[-1]
+        ax.plot(steps, values, linewidth=1.2, label=short)
+        _style(ax, "iteration", short, short)
+
+    _hide_unused_axes(axs, len(tags), nrows, ncols)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    return fig
+
+
+def save_tb_plots(
+    log_dir: str,
+    save_dir: Optional[str] = None,
+    groups: Sequence[Tuple[str, str]] = TB_PLOT_GROUPS,
+    dpi: int = 150,
+    max_points: int = 2000,
+) -> List[str]:
+    """Export TensorBoard Episode / Loss / Train curves as PNGs into the run dir."""
+    save_dir = save_dir or log_dir
+    if not log_dir or not os.path.isdir(log_dir):
+        print(f"No TB log dir: {log_dir}")
+        return []
+
+    series = load_tb_scalars(log_dir, max_points=max_points)
+    if not series:
+        print(f"No TB scalars in: {log_dir}")
+        return []
+
+    saved: List[str] = []
+    for prefix, stem in groups:
+        group = _filter_tb_group(series, prefix)
+        fig = build_tb_group_figure(group, title=f"{prefix} ({os.path.basename(log_dir)})")
+        if fig is None:
+            print(f"No TB tags for group '{prefix}'; skip.")
+            continue
+        saved.append(save_figure(fig, save_dir, f"{stem}.png", dpi=dpi, layout=False))
+    return saved
+
+
+def export_training_plots(
+    runner,
+    log_dir: Optional[str],
+    save_dir: Optional[str] = None,
+    dpi: int = 150,
+) -> List[str]:
+    """Flush TB writer and dump Episode/Loss/Train PNGs (default: ``log_dir/tb_curves``)."""
+    if not log_dir:
+        return []
+    writer = getattr(runner, "writer", None)
+    if writer is not None:
+        writer.flush()
+    out_dir = save_dir or os.path.join(log_dir, "tb_curves")
+    return save_tb_plots(log_dir, save_dir=out_dir, dpi=dpi)
 
 
 def _plot_process_main(log: Dict[str, list], dt: float, foot_labels: tuple) -> None:
@@ -141,6 +339,10 @@ def _plot_process_main(log: Dict[str, list], dt: float, foot_labels: tuple) -> N
         return
     plt.show()
 
+
+# ---------------------------------------------------------------------------
+# Logger facade (play / sim2sim / optional TB export)
+# ---------------------------------------------------------------------------
 
 class Logger:
     def __init__(self, dt: float):
@@ -180,56 +382,47 @@ class Logger:
     def compute_tracking_metrics(self) -> Dict[str, float]:
         """RMSE of measured base velocity vs command (used by sim2sim eval)."""
         log = self.state_log
-        if not _has(log, "base_vel_x") or not _has(log, "command_x"):
+        pairs = (
+            ("base_vel_x", "command_x", "vx_rmse"),
+            ("base_vel_y", "command_y", "vy_rmse"),
+            ("base_vel_yaw", "command_yaw", "yaw_rmse"),
+        )
+        if not (_has(log, "base_vel_x") and _has(log, "command_x")):
             return {}
 
-        def _rmse(a, b) -> float:
-            return float(np.sqrt(np.mean((_as_1d(a) - _as_1d(b)) ** 2)))
-
-        out = {
-            "vx_rmse": _rmse(log["base_vel_x"], log["command_x"]),
-            "n_steps": float(len(log["base_vel_x"])),
-        }
-        if _has(log, "base_vel_y") and _has(log, "command_y"):
-            out["vy_rmse"] = _rmse(log["base_vel_y"], log["command_y"])
-        if _has(log, "base_vel_yaw") and _has(log, "command_yaw"):
-            out["yaw_rmse"] = _rmse(log["base_vel_yaw"], log["command_yaw"])
+        out: Dict[str, float] = {"n_steps": float(len(log["base_vel_x"]))}
+        for measured, command, name in pairs:
+            if _has(log, measured) and _has(log, command):
+                err = _as_1d(log[measured]) - _as_1d(log[command])
+                out[name] = float(np.sqrt(np.mean(err ** 2)))
         return out
 
     def plot_states(
-        self, save_dir: Optional[str] = None, show: bool = False, async_show: bool = True,
-        foot_labels: Sequence[str] = DEFAULT_FOOT_LABELS, filename: Optional[str] = None, dpi: int = 150,) -> Optional[str]:
-        """
-        Plot logged robot states (shared by play / sim2sim).
-
-        Args:
-            save_dir: If set, save a PNG under this directory and return its path.
-            show: If True, display the figure (blocks unless async_show=True).
-            async_show: Show in a background process so Isaac Gym / MuJoCo keep running.
-            foot_labels: Legend labels for contact force curves.
-            filename: Optional PNG filename; default result_YYYYmmdd_HHMMSS.png.
-            dpi: Save resolution.
-
-        Returns:
-            Saved PNG path, or None if nothing was saved.
-        """
+        self,
+        save_dir: Optional[str] = None,
+        show: bool = False,
+        async_show: bool = True,
+        foot_labels: Sequence[str] = DEFAULT_FOOT_LABELS,
+        filename: Optional[str] = None,
+        dpi: int = 150,
+    ) -> Optional[str]:
+        """Plot logged robot states (shared by play / sim2sim)."""
         log = self.snapshot()
         if not _has(log, "base_vel_x"):
             print("No state log to plot; skip.")
             return None
 
+        fig = build_state_figure(log, self.dt, foot_labels=foot_labels)
+        if fig is None:
+            return None
+
         saved_path = None
         if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig = build_state_figure(log, self.dt, foot_labels=foot_labels)
-            if fig is None:
-                return None
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             name = filename or f"play_{stamp}.png"
-            saved_path = os.path.join(save_dir, name)
-            fig.savefig(saved_path, dpi=dpi, bbox_inches="tight")
-            plt.close(fig)
-            print(f"Saved state plot: {saved_path}")
+            saved_path = save_figure(fig, save_dir, name, dpi=dpi, layout=False)
+            # save_figure closes fig; rebuild only if still need to show
+            fig = None
 
         if show:
             labels = tuple(foot_labels)
@@ -242,11 +435,24 @@ class Logger:
                 )
                 self.plot_process.start()
             else:
-                fig = build_state_figure(log, self.dt, foot_labels=foot_labels)
+                if fig is None:
+                    fig = build_state_figure(log, self.dt, foot_labels=foot_labels)
                 if fig is not None:
                     plt.show()
 
+        elif fig is not None:
+            plt.close(fig)
+
         return saved_path
+
+    def plot_tb_curves(
+        self,
+        log_dir: str,
+        save_dir: Optional[str] = None,
+        dpi: int = 150,
+    ) -> List[str]:
+        """Save TB reward / loss / train PNGs."""
+        return save_tb_plots(log_dir=log_dir, save_dir=save_dir, dpi=dpi)
 
     def print_rewards(self) -> None:
         print("Average rewards per second:")
