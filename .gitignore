@@ -65,4 +65,5 @@ videos/
 *.egg-info/
 __pycache__/
 .github/
+.cursor/
 logs/
