@@ -49,6 +49,9 @@ TB_PLOT_GROUPS = (
     ("Train", "tb_train"),
 )
 
+# TensorBoard UI default smoothing weight (~0.6).
+TB_SMOOTH_WEIGHT = 0.6
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -260,28 +263,91 @@ def _filter_tb_group(
     return dict(sorted(selected.items()))
 
 
+def tb_smooth(values: Sequence[float], weight: float = TB_SMOOTH_WEIGHT) -> np.ndarray:
+    """
+    TensorBoard scalar smoothing (EMA + debias).
+
+    Matches vz_line_chart2:
+    last = last * weight + (1 - weight) * x
+    smoothed = last / (1 - weight ** n)
+    """
+    vals = np.asarray(values, dtype=np.float64)
+    if vals.size == 0:
+        return vals
+    weight = float(np.clip(weight, 0.0, 0.999))
+    if weight <= 0.0:
+        return vals.copy()
+
+    last = 0.0
+    num_acc = 0
+    out = np.empty_like(vals)
+    for i, x in enumerate(vals):
+        last = last * weight + (1.0 - weight) * x
+        num_acc += 1
+        debias = 1.0 - (weight ** num_acc)
+        out[i] = last / debias if debias > 1e-12 else last
+    return out
+
+
 def build_tb_group_figure(
     series: Dict[str, List[Tuple[int, float]]],
     title: str,
     ncols: int = 3,
+    smooth_weight: float = TB_SMOOTH_WEIGHT,
+    show_raw: bool = True,
 ):
-    """Build a multi-subplot figure for one TB tag group."""
+    """Build a multi-subplot figure for one TB tag group (TB-style EMA smooth)."""
     if not series:
         return None
 
     tags = list(series.keys())
-    _apply_plot_rc(10)
-    fig, axs, nrows, ncols = _make_axes_grid(len(tags), ncols=ncols)
-    fig.suptitle(title, fontsize=14)
+    is_reward = title.startswith("Episode")
+    # Thin crisp lines (raw faint, smooth slightly stronger).
+    raw_lw = 0.35 if is_reward else 0.3
+    smooth_lw = 1.1 if is_reward else 0.95
+    raw_alpha = 0.18 if is_reward else 0.15
+    smooth_color = "#1a5fb4" if is_reward else "#3584e4"
+    raw_color = "#62a0ea"
+
+    _apply_plot_rc(11 if is_reward else 10)
+    fig, axs, nrows, ncols = _make_axes_grid(
+        len(tags),
+        ncols=ncols,
+        cell_size=(4.5, 3.1) if is_reward else (4.2, 2.8),
+    )
+    fig.suptitle(title, fontsize=14, fontweight="bold")
 
     for i, tag in enumerate(tags):
         r, c = divmod(i, ncols)
         ax = axs[r, c]
-        steps = [p[0] for p in series[tag]]
-        values = [p[1] for p in series[tag]]
+        steps = np.asarray([p[0] for p in series[tag]], dtype=np.float64)
+        values = np.asarray([p[1] for p in series[tag]], dtype=np.float64)
         short = tag.split("/", 1)[-1]
-        ax.plot(steps, values, linewidth=1.2, label=short)
-        _style(ax, "iteration", short, short)
+        smoothed = tb_smooth(values, weight=smooth_weight)
+
+        if show_raw and len(values) > 1:
+            ax.plot(
+                steps, values,
+                color=raw_color, linewidth=raw_lw, alpha=raw_alpha,
+                label=None, zorder=1,
+            )
+        ax.plot(
+            steps, smoothed,
+            color=smooth_color,
+            linewidth=smooth_lw,
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            label=f"{short} (smooth={smooth_weight:g})",
+            zorder=2,
+        )
+        ax.set_xlabel("iteration")
+        ax.set_ylabel(short)
+        ax.set_title(short, fontweight="bold" if is_reward else "normal")
+        ax.legend(loc="best", framealpha=0.92, fontsize=8)
+        ax.grid(True, alpha=0.35, linewidth=0.8)
+        ax.tick_params(axis="both", which="major", length=4, width=1.1)
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.15 if is_reward else 1.0)
 
     _hide_unused_axes(axs, len(tags), nrows, ncols)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
@@ -294,6 +360,7 @@ def save_tb_plots(
     groups: Sequence[Tuple[str, str]] = TB_PLOT_GROUPS,
     dpi: int = 150,
     max_points: int = 2000,
+    smooth_weight: float = TB_SMOOTH_WEIGHT,
 ) -> List[str]:
     """Export TensorBoard Episode / Loss / Train curves as PNGs into the run dir."""
     save_dir = save_dir or log_dir
@@ -309,7 +376,11 @@ def save_tb_plots(
     saved: List[str] = []
     for prefix, stem in groups:
         group = _filter_tb_group(series, prefix)
-        fig = build_tb_group_figure(group, title=f"{prefix} ({os.path.basename(log_dir)})")
+        fig = build_tb_group_figure(
+            group,
+            title=f"{prefix} ({os.path.basename(log_dir)})",
+            smooth_weight=smooth_weight,
+        )
         if fig is None:
             print(f"No TB tags for group '{prefix}'; skip.")
             continue
