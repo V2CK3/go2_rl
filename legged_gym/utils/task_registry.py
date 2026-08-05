@@ -166,7 +166,7 @@ class TaskRegistry():
         current_date_time_str = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
         if log_root=="default":
-            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'pt_models')
+            log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
             log_dir = os.path.join(log_root, current_date_time_str + '_' + train_cfg.runner.run_name)
         elif log_root is None:
             # No new run folder (used by play). Still know where checkpoints live.
@@ -195,6 +195,7 @@ class TaskRegistry():
 
         runner_class = eval(train_cfg_dict["runner_class_name"])
         runner = runner_class(env, all_cfg, log_dir, device=args.rl_device)
+        runner.resume_path = resume_path
         if resume_path is not None:
             runner.load(resume_path, load_optimizer=False)
 

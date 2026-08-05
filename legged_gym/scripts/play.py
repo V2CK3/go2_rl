@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 import os
+import re
 import cv2
 import numpy as np
 from isaacgym import gymapi
@@ -87,6 +88,17 @@ def play(args):
         env=env, name=args.task, args=args, train_cfg=train_cfg, log_root=None
     )
     policy = ppo_runner.get_inference_policy(device=env.device)
+
+    resume_path = getattr(ppo_runner, "resume_path", None)
+    if resume_path:
+        play_run_name = os.path.basename(os.path.dirname(resume_path))
+        # Prefer filename iter (model_12300.pt); saved dict['iter'] can lag behind.
+        m = re.search(r"model_(\d+)\.pt$", os.path.basename(resume_path))
+        play_iteration = int(m.group(1)) if m else int(getattr(ppo_runner, "current_learning_iteration", -1))
+    else:
+        play_run_name = str(train_cfg.runner.load_run)
+        play_iteration = int(getattr(ppo_runner, "current_learning_iteration", -1))
+    print(f"Play checkpoint: run={play_run_name}  iter={play_iteration}")
     
     # export policy as a jit module (used to run it from C++)
     if EXPORT_POLICY:
@@ -133,7 +145,13 @@ def play(args):
             )
         elif PLOT_STATES and i == stop_log_steps:
             path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, '0_exported', 'sim2play')
-            logger.plot_states(show=True, async_show=True,save_dir=path)
+            logger.plot_states(
+                show=True,
+                async_show=True,
+                save_dir=path,
+                run_name=play_run_name,
+                iteration=play_iteration,
+            )
         i += 1
 
 
@@ -143,7 +161,7 @@ if __name__ == '__main__':
 
     args = get_args()
     args.task = "go2_stairs"
-    args.load_run = -1
+    args.load_run = "2026-08-04_19-04-24_stairs"       # -1
     args.checkpoint = -1
     # args.num_envs = 
 

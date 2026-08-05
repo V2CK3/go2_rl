@@ -145,6 +145,7 @@ def build_state_figure(
     log: Dict[str, list],
     dt: float,
     foot_labels: Sequence[str] = DEFAULT_FOOT_LABELS,
+    suptitle: Optional[str] = None,
 ):
     """Build the shared 3x3 state figure used by play and sim2sim."""
     if not log or not _has(log, "base_vel_x"):
@@ -209,7 +210,11 @@ def build_state_figure(
         log, "time [s]", "vz [m/s]", "Base vel Z",
     )
 
-    fig.tight_layout()
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=13, fontweight="bold")
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+    else:
+        fig.tight_layout()
     return fig
 
 
@@ -404,8 +409,13 @@ def export_training_plots(
     return save_tb_plots(log_dir, save_dir=out_dir, dpi=dpi)
 
 
-def _plot_process_main(log: Dict[str, list], dt: float, foot_labels: tuple) -> None:
-    fig = build_state_figure(log, dt, foot_labels=foot_labels)
+def _plot_process_main(
+    log: Dict[str, list],
+    dt: float,
+    foot_labels: tuple,
+    suptitle: Optional[str] = None,
+) -> None:
+    fig = build_state_figure(log, dt, foot_labels=foot_labels, suptitle=suptitle)
     if fig is None:
         return
     plt.show()
@@ -476,6 +486,9 @@ class Logger:
         foot_labels: Sequence[str] = DEFAULT_FOOT_LABELS,
         filename: Optional[str] = None,
         dpi: int = 150,
+        run_name: Optional[str] = None,
+        iteration: Optional[int] = None,
+        suptitle: Optional[str] = None,
     ) -> Optional[str]:
         """Plot logged robot states (shared by play / sim2sim)."""
         log = self.snapshot()
@@ -483,16 +496,23 @@ class Logger:
             print("No state log to plot; skip.")
             return None
 
-        fig = build_state_figure(log, self.dt, foot_labels=foot_labels)
+        if suptitle is None and (run_name is not None or iteration is not None):
+            run_txt = run_name if run_name is not None else "?"
+            iter_txt = str(iteration) if iteration is not None else "?"
+            suptitle = f"run={run_txt}  |  iter={iter_txt}"
+
+        fig = build_state_figure(log, self.dt, foot_labels=foot_labels, suptitle=suptitle)
         if fig is None:
             return None
 
         saved_path = None
         if save_dir is not None:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            name = filename or f"play_{stamp}.png"
-            saved_path = save_figure(fig, save_dir, name, dpi=dpi, layout=False)
-            # save_figure closes fig; rebuild only if still need to show
+            if filename is None:
+                run_part = (run_name or "unknown").replace(os.sep, "_")
+                iter_part = f"iter{iteration}" if iteration is not None else "iter?"
+                filename = f"play_{run_part}_{iter_part}_{stamp}.png"
+            saved_path = save_figure(fig, save_dir, filename, dpi=dpi, layout=False)
             fig = None
 
         if show:
@@ -502,12 +522,14 @@ class Logger:
                     self.plot_process.terminate()
                 self.plot_process = Process(
                     target=_plot_process_main,
-                    args=(log, self.dt, labels),
+                    args=(log, self.dt, labels, suptitle),
                 )
                 self.plot_process.start()
             else:
                 if fig is None:
-                    fig = build_state_figure(log, self.dt, foot_labels=foot_labels)
+                    fig = build_state_figure(
+                        log, self.dt, foot_labels=foot_labels, suptitle=suptitle
+                    )
                 if fig is not None:
                     plt.show()
 
