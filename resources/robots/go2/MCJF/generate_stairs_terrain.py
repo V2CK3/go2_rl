@@ -1,20 +1,54 @@
 #!/usr/bin/env python3
-"""Generate a MuJoCo scene with mixed stairs + random rough terrain for Go2 sim2sim."""
+"""Generate MuJoCo stairs scenes matched to Isaac Gym training difficulty.
+
+Training source (``legged_gym/utils/terrain.py`` + ``Go2StairsCfg``)::
+
+    difficulty = terrain_level / num_rows          # num_rows = 10
+    step_height = 0.05 + 0.18 * difficulty        # meters
+    step_width  = 0.31                            # meters (fixed)
+    platform_size = 3.0                           # meters
+
+Writes ``scene_stairs_L{0..9}/scene.xml`` + ``README.md`` for each level.
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
-import struct
-import zlib
 from pathlib import Path
-
-import numpy as np
 
 ROOT = Path(__file__).resolve().parent  # .../MCJF
 MCJF = ROOT
-SCENE_DIR = MCJF / "scene_1"
-OUT_XML = SCENE_DIR / "scene.xml"
+
+# Match Go2StairsCfg.terrain
+NUM_ROWS = 10
+STEP_WIDTH = 0.31
+PLATFORM_SIZE = 3.0
+N_STEPS = 8  # ~ half of 8 m env minus platform / step_width
+HALF_WIDTH = 1.2  # lane half-width (m); full width = 2.4 m
+SPAWN_PAD_HALF = (1.5, 2.0, 0.01)
+
+
+def difficulty_for_level(level: int) -> float:
+    """Curriculum difficulty for terrain row ``level`` in ``[0, num_rows)``."""
+    if not 0 <= level < NUM_ROWS:
+        raise ValueError(f"level must be in [0, {NUM_ROWS}), got {level}")
+    return level / NUM_ROWS
+
+
+def step_height_for_difficulty(difficulty: float) -> float:
+    """Isaac Gym stairs riser height (m)."""
+    return 0.05 + 0.18 * difficulty
+
+
+def level_rgba(level: int) -> str:
+    """Visual tint: cool/easy -> warm/hard."""
+    t = level / max(NUM_ROWS - 1, 1)
+    r = 0.35 + 0.35 * t
+    g = 0.55 - 0.20 * t
+    b = 0.50 - 0.25 * t
+    return f"{r:.2f} {g:.2f} {b:.2f} 1"
+
 
 def _quat_wxyz(w=1.0, x=0.0, y=0.0, z=0.0) -> str:
     return f"{w} {x} {y} {z}"
@@ -121,247 +155,65 @@ def add_stairs_down(
     return x0 + n_steps * step_w
 
 
-def add_random_boxes(
-    geoms: list,
-    *,
-    rng: np.random.Generator,
-    x_range,
-    y_range,
-    n: int,
-    name_prefix: str,
-) -> None:
-    for i in range(n):
-        sx = float(rng.uniform(0.15, 0.45))
-        sy = float(rng.uniform(0.15, 0.45))
-        sz = float(rng.uniform(0.03, 0.12))
-        x = float(rng.uniform(*x_range))
-        y = float(rng.uniform(*y_range))
-        add_box(
-            geoms,
-            pos=(x, y, 0.5 * sz),
-            size=(0.5 * sx, 0.5 * sy, 0.5 * sz),
-            rgba="0.55 0.42 0.30 1",
-            name=f"{name_prefix}_{i}",
-        )
+def scene_dir_for_level(level: int) -> Path:
+    return MCJF / f"scene_stairs_L{level}"
 
 
-def _save_png_gray(path: Path, img: np.ndarray) -> None:
-    """Save HxW uint8 grayscale PNG."""
-    assert img.dtype == np.uint8 and img.ndim == 2
-    h, w = img.shape
-    try:
-        from PIL import Image
-
-        Image.fromarray(img, mode="L").save(path)
-    except ImportError:
-
-        def _chunk(tag: bytes, data: bytes) -> bytes:
-            return (
-                struct.pack(">I", len(data))
-                + tag
-                + data
-                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-            )
-
-        raw = b"".join(b"\x00" + row.tobytes() for row in img)
-        png = b"\x89PNG\r\n\x1a\n"
-        png += _chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
-        png += _chunk(b"IDAT", zlib.compress(raw, 9))
-        png += _chunk(b"IEND", b"")
-        path.write_bytes(png)
-
-
-def make_rough_hfield(path: Path, res: int = 256, seed: int = 0) -> None:
-    """Multi-octave random rough heightfield with bumps / pits / ridges."""
-    rng = np.random.default_rng(seed)
-    yy, xx = np.meshgrid(
-        np.linspace(0.0, 1.0, res),
-        np.linspace(0.0, 1.0, res),
-        indexing="ij",
-    )
-
-    field = np.zeros((res, res), dtype=np.float64)
-
-    # Multi-octave band-limited noise (approx Perlin via summed sines + noise).
-    for octave in range(1, 7):
-        amp = 1.0 / (1.4 ** (octave - 1))
-        fx = float(rng.uniform(2.0, 9.0) * octave)
-        fy = float(rng.uniform(2.0, 9.0) * octave)
-        phx = float(rng.uniform(0.0, 2.0 * np.pi))
-        phy = float(rng.uniform(0.0, 2.0 * np.pi))
-        field += amp * np.sin(2.0 * np.pi * fx * xx + phx) * np.cos(
-            2.0 * np.pi * fy * yy + phy
-        )
-        # Cross-term ridges
-        if octave <= 3:
-            field += 0.35 * amp * np.sin(
-                2.0 * np.pi * (fx * xx + 0.7 * fy * yy) + phx
-            )
-
-    # Spatially correlated noise via multi-scale bilinear upsampling.
-    noise = rng.standard_normal((res, res))
-    for k in (8, 16, 32, 64):
-        grid = rng.standard_normal((k, k)).astype(np.float64)
-        try:
-            from PIL import Image
-
-            up = np.asarray(
-                Image.fromarray(grid.astype(np.float32), mode="F").resize(
-                    (res, res), resample=Image.BILINEAR
-                ),
-                dtype=np.float64,
-            )
-        except Exception:
-            idx = np.linspace(0, k - 1, res).astype(int)
-            up = grid[np.ix_(idx, idx)]
-        field += (0.55 / np.sqrt(k)) * up
-    field += 0.08 * noise
-
-    # Random gaussian bumps / pits
-    n_features = int(rng.integers(18, 36))
-    for _ in range(n_features):
-        cx = float(rng.uniform(0.05, 0.95))
-        cy = float(rng.uniform(0.05, 0.95))
-        sigma = float(rng.uniform(0.02, 0.12))
-        amp = float(rng.uniform(-0.9, 1.2))
-        field += amp * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma**2))
-
-    # Occasional sharp rock-like spikes (clipped later by normalize)
-    n_spikes = int(rng.integers(6, 14))
-    for _ in range(n_spikes):
-        cx = float(rng.uniform(0.1, 0.9))
-        cy = float(rng.uniform(0.1, 0.9))
-        sigma = float(rng.uniform(0.008, 0.025))
-        amp = float(rng.uniform(0.4, 1.5))
-        field += amp * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma**2))
-
-    # Soften edges so the patch blends into the floor.
-    edge = np.minimum.reduce([xx, 1.0 - xx, yy, 1.0 - yy])
-    taper = np.clip(edge / 0.08, 0.0, 1.0)
-    field = (field - field.mean()) * taper
-
-    field = (field - field.min()) / (field.max() - field.min() + 1e-8)
-    # Stretch contrast a bit so relief is more visible.
-    field = np.clip(field**0.85, 0.0, 1.0)
-    img = (field * 255.0).astype(np.uint8)
-    _save_png_gray(path, img)
-
-
-def build_scene(seed: int = 42) -> str:
-    """Build scene_1 MJCF string.
-
-    Shape conventions (MuJoCo box ``size`` = half-extents):
-      full_x = 2*size_x, full_y = 2*size_y, full_z = 2*size_z
-    Stairs: each tread is a box whose height grows with step index (solid under the step).
-    """
-    rng = np.random.default_rng(seed)
+def build_level_scene(level: int) -> str:
+    """Build MJCF for one curriculum stairs level (up -> platform -> down)."""
+    difficulty = difficulty_for_level(level)
+    step_h = step_height_for_difficulty(difficulty)
+    step_w = STEP_WIDTH
+    rgba = level_rgba(level)
     geoms: list[str] = []
-    assets: list[str] = []
 
-    # --- Floor spawn pad (box) ---
-    # Full footprint 3.0 m (x) x 9.0 m (y), thickness 2 cm; center at origin.
-    # MuJoCo size=(1.5, 4.5, 0.01) => half-extents.
     add_box(
         geoms,
-        pos=(0.0, 0.0, 0.01),
-        size=(1.5, 4.5, 0.01),
+        pos=(0.0, 0.0, SPAWN_PAD_HALF[2]),
+        size=SPAWN_PAD_HALF,
         rgba="0.25 0.28 0.30 1",
         name="spawn_pad",
     )
 
-    # --- Stair lanes (box stacks): up -> platform -> down, along +x from x0=1.5 ---
-    # Fields: name, lane_y, step_h, step_w, n_steps, half_width, platform_len, rgba, title
-    #   step_h  = riser height (m) per step
-    #   step_w  = tread depth along +x (m) per step
-    #   half_w  = half lane width along y (full width = 2*half_w)
-    #   plat_len = flat top length along +x (m)
-    lanes = [
-        ("laneA", 0.0, 0.08, 0.31, 8, 0.90, 2.0, "0.50 0.52 0.55 1", "Lane A"),   # mid: H8cm W31cm
-        ("laneB", 2.8, 0.12, 0.28, 8, 0.85, 1.8, "0.42 0.55 0.48 1", "Lane B"),   # tall/narrow
-        ("laneC", -2.8, 0.18, 0.25, 6, 0.85, 1.5, "0.55 0.45 0.40 1", "Lane C"),  # steep
-        ("laneD", 5.5, 0.05, 0.35, 10, 0.90, 2.2, "0.40 0.48 0.58 1", "Lane D"), # gentle/wide
-    ]
-
-    for name, y0, step_h, step_w, n_steps, half_w, plat_len, rgba, title in lanes:
-        # Up-stairs: step i has height (i+1)*step_h, box size=(step_w/2, half_w, h/2)
-        x = add_stairs_up(
-            geoms,
-            x0=1.5,
-            y0=y0,
-            step_h=step_h,
-            step_w=step_w,
-            n_steps=n_steps,
-            half_width=half_w,
-            name_prefix=name,
-            rgba=rgba,
-        )
-        top = n_steps * step_h  # platform / top riser height
-        # Platform: box length=plat_len, width=2*half_w, height=top
-        x = add_platform(
-            geoms,
-            x0=x,
-            y0=y0,
-            length=plat_len,
-            half_width=half_w,
-            height=top,
-            name=f"{name}_plat",
-            rgba=rgba,
-        )
-        # Down-stairs: descending risers from top_height along +x
-        add_stairs_down(
-            geoms,
-            x0=x,
-            y0=y0,
-            step_h=step_h,
-            step_w=step_w,
-            n_steps=n_steps,
-            half_width=half_w,
-            top_height=top,
-            name_prefix=name,
-            rgba=rgba,
-        )
-
-    # --- Random obstacle boxes (type=box) ---
-    # Each box: full edges uniform in [0.15,0.45] m (xy), height [0.03,0.12] m.
-    add_random_boxes(
-        geoms, rng=rng, x_range=(0.2, 1.3), y_range=(-5.5, -3.8), n=18, name_prefix="randL",
+    x0 = SPAWN_PAD_HALF[0]  # start stairs at front edge of spawn pad
+    x = add_stairs_up(
+        geoms,
+        x0=x0,
+        y0=0.0,
+        step_h=step_h,
+        step_w=step_w,
+        n_steps=N_STEPS,
+        half_width=HALF_WIDTH,
+        name_prefix="stairs",
+        rgba=rgba,
     )
-    add_random_boxes(
-        geoms, rng=rng, x_range=(0.2, 1.3), y_range=(3.8, 5.0), n=14, name_prefix="randR",
+    top = N_STEPS * step_h
+    x = add_platform(
+        geoms,
+        x0=x,
+        y0=0.0,
+        length=PLATFORM_SIZE,
+        half_width=HALF_WIDTH,
+        height=top,
+        name="stairs_plat",
+        rgba=rgba,
     )
-    add_random_boxes(
-        geoms, rng=rng, x_range=(12.0, 16.0), y_range=(-2.0, 2.0), n=25, name_prefix="randFar",
+    add_stairs_down(
+        geoms,
+        x0=x,
+        y0=0.0,
+        step_h=step_h,
+        step_w=step_w,
+        n_steps=N_STEPS,
+        half_width=HALF_WIDTH,
+        top_height=top,
+        name_prefix="stairs",
+        rgba=rgba,
     )
 
-    # --- Rough heightfield patches (type=hfield) ---
-    # size=(radius_x, radius_y, elevation_z, base_z): footprint 2*rx x 2*ry, peak ~elevation_z.
-    # PNG is 256x256 grayscale multi-octave noise (see make_rough_hfield).
-    hfield_geoms: list[str] = []
-    patches = [
-        # name, file, size(rx,ry,elev,base), pos, rgba, seed_off
-        ("rough_main", "rough_hfield.png", (3.2, 2.2, 0.16, 0.02), (14.5, 0.0, 0.0), "0.35 0.50 0.35 1", 0),
-        ("rough_n", "rough_hfield_n.png", (2.0, 1.6, 0.10, 0.02), (13.0, 3.8, 0.0), "0.40 0.48 0.32 1", 17),
-        ("rough_s", "rough_hfield_s.png", (2.2, 1.5, 0.14, 0.02), (15.5, -3.5, 0.0), "0.32 0.45 0.38 1", 91),
-        ("rough_far", "rough_hfield_far.png", (2.5, 2.0, 0.20, 0.02), (18.5, 1.0, 0.0), "0.30 0.42 0.30 1", 203),
-    ]
-    for hname, fname, size, pos, rgba, seed_off in patches:
-        out_path = SCENE_DIR / fname
-        make_rough_hfield(out_path, res=256, seed=seed + seed_off)
-        # go2.xml meshdir="assets" -> resolve from MCJF/assets into scene_1/
-        assets.append(
-            f'    <hfield name="{hname}" '
-            f'size="{size[0]} {size[1]} {size[2]} {size[3]}" '
-            f'file="../scene_1/{fname}"/>'
-        )
-        hfield_geoms.append(
-            f'    <geom name="{hname}_geom" type="hfield" hfield="{hname}" '
-            f'pos="{pos[0]} {pos[1]} {pos[2]}" rgba="{rgba}"/>'
-        )
-
-    xml = f"""<mujoco model="go2 scene_1 stairs mixed">
+    xml = f"""<mujoco model="go2 scene_stairs_L{level}">
   <include file="../go2.xml"/>
-  <!-- go2.xml sets meshdir="assets"; override so meshes resolve from MCJF/ when this
-       scene lives in scene_1/ -->
+  <!-- go2.xml sets meshdir="assets"; override so meshes resolve from MCJF/ -->
   <compiler meshdir="../assets"/>
 
   <statistic center="6 0 0.4" extent="10"/>
@@ -377,72 +229,187 @@ def build_scene(seed: int = 42) -> str:
     <texture type="2d" name="groundplane" builtin="checker" mark="edge"
       rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
-{os.linesep.join(assets)}
   </asset>
 
   <worldbody>
     <light pos="0 0 3.0" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 {os.linesep.join(geoms)}
-{os.linesep.join(hfield_geoms)}
   </worldbody>
 </mujoco>
 """
     return xml
 
 
+def write_level_readme(level: int, out_dir: Path) -> None:
+    difficulty = difficulty_for_level(level)
+    step_h = step_height_for_difficulty(difficulty)
+    top = N_STEPS * step_h
+    run_len = N_STEPS * STEP_WIDTH
+    total_x = SPAWN_PAD_HALF[0] + run_len + PLATFORM_SIZE + run_len
+
+    text = f"""# scene_stairs_L{level} — training curriculum level {level}
+
+MuJoCo stairs scene matched to Isaac Gym `Go2StairsCfg` / `terrain.py` curriculum.
+
+## Training formula
+
+From `legged_gym/utils/terrain.py` (`make_terrain` + `curiculum`):
+
+```
+difficulty   = level / num_rows          # num_rows = {NUM_ROWS}
+step_height  = 0.05 + 0.18 * difficulty  # meters
+step_width   = 0.31                      # meters (fixed)
+platform_size = 3.0                      # meters
+```
+
+Stair type in training: `pyramid_stairs_terrain` (stairs-up / stairs-down columns).
+
+## This scene (level {level})
+
+| Parameter | Value |
+|-----------|-------|
+| `level` | {level} |
+| `difficulty` | {difficulty:.2f} (`{level}/{NUM_ROWS}`) |
+| `step_height` (riser) | **{step_h:.4f} m** ({step_h * 100:.2f} cm) |
+| `step_width` (tread) | **{STEP_WIDTH:.2f} m** ({STEP_WIDTH * 100:.0f} cm) |
+| `n_steps` (each side) | {N_STEPS} |
+| platform length | {PLATFORM_SIZE:.1f} m |
+| platform / top height | {top:.4f} m |
+| lane half-width | {HALF_WIDTH:.1f} m (full {2 * HALF_WIDTH:.1f} m) |
+| layout | spawn pad → up stairs → platform → down stairs (+x) |
+| approx. run length (x) | {total_x:.2f} m from origin |
+
+Sim2sim uses box stacks (up / platform / down) with the same `step_height` /
+`step_width` / platform length as training. Geometry is a linear corridor, not
+a full heightfield pyramid.
+
+## How to load
+
+In `sim2sim_deploy/sim2sim_go2_stairs.py` set:
+
+```python
+difficulty_level = {level}  # 0 .. {NUM_ROWS - 1}
+```
+
+Or open this file directly:
+
+```
+resources/robots/go2/MCJF/scene_stairs_L{level}/scene.xml
+```
+
+## Regenerate
+
+```bash
+python resources/robots/go2/MCJF/generate_stairs_terrain.py
+python resources/robots/go2/MCJF/generate_stairs_terrain.py --level {level}
+```
+
+See also: `../STAIRS_DIFFICULTY.md` for the full level table.
+"""
+    (out_dir / "README.md").write_text(text)
+
+
+def write_index_readme(out_path: Path) -> None:
+    rows = []
+    for level in range(NUM_ROWS):
+        d = difficulty_for_level(level)
+        h = step_height_for_difficulty(d)
+        rows.append(
+            f"| {level} | {d:.2f} | {h:.4f} | {h * 100:.2f} | "
+            f"`scene_stairs_L{level}/` |"
+        )
+    table = "\n".join(rows)
+    text = f"""# Stairs difficulty levels (sim2sim ↔ training)
+
+Curriculum stairs parameters from Isaac Gym training
+(`Go2StairsCfg.terrain.num_rows = {NUM_ROWS}`, `legged_gym/utils/terrain.py`):
+
+```
+difficulty  = level / {NUM_ROWS}
+step_height = 0.05 + 0.18 * difficulty   # m
+step_width  = 0.31                       # m (all levels)
+platform    = 3.0                        # m
+```
+
+`max_init_terrain_level = 5` only affects **initial** spawn rows; the map still
+has rows `0 .. {NUM_ROWS - 1}`.
+
+## Level table
+
+| Level | difficulty | step_height (m) | step_height (cm) | Scene folder |
+|------:|-----------:|----------------:|-----------------:|:-------------|
+{table}
+
+Fixed for all levels: `step_width = {STEP_WIDTH} m`, `platform_size = {PLATFORM_SIZE} m`,
+`n_steps = {N_STEPS}` per side.
+
+## Scene index
+
+| Folder | Role |
+|--------|------|
+| `scene_0/` | Flat ground |
+| `scene_stairs_L0/` … `scene_stairs_L9/` | Curriculum stairs by difficulty |
+| `scene_1/` | Legacy mixed multi-lane stairs (not difficulty-indexed) |
+| `scene_2/` | Legacy heightfield terrain |
+
+## sim2sim
+
+```python
+# sim2sim_deploy/sim2sim_go2_stairs.py
+difficulty_level = 4  # pick 0..9
+```
+
+Regenerate all levels:
+
+```bash
+python resources/robots/go2/MCJF/generate_stairs_terrain.py
+```
+"""
+    out_path.write_text(text)
+
+
+def generate_level(level: int) -> Path:
+    out_dir = scene_dir_for_level(level)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "scene.xml").write_text(build_level_scene(level))
+    write_level_readme(level, out_dir)
+    return out_dir
+
+
 def main():
     # Usage:
     #   python resources/robots/go2/MCJF/generate_stairs_terrain.py
-    #   python resources/robots/go2/MCJF/generate_stairs_terrain.py --seed 42
-    #   python resources/robots/go2/MCJF/generate_stairs_terrain.py --out /path/to/scene.xml
+    #   python resources/robots/go2/MCJF/generate_stairs_terrain.py --level 4
     #
-    # Writes scene_1/scene.xml + rough_hfield*.png. Shape / terrain sizes:
-    #
-    # [box] spawn_pad
-    #   half-size (1.5, 4.5, 0.01) m  =>  footprint 3.0 x 9.0 m, thickness 2 cm, at origin
-    #
-    # [box] stair lanes (from x=1.5 m along +x: up -> platform -> down)
-    #   MuJoCo box size = half-extents. Each up-step i: height=(i+1)*H, depth=W, width=2*half_w.
-    #   Lane A y=0.0 : H=0.08 m, W=0.31 m, 8 steps, half_w=0.90, platform_len=2.0  (top=0.64 m)
-    #   Lane B y=2.8 : H=0.12 m, W=0.28 m, 8 steps, half_w=0.85, platform_len=1.8  (top=0.96 m)
-    #   Lane C y=-2.8: H=0.18 m, W=0.25 m, 6 steps, half_w=0.85, platform_len=1.5  (top=1.08 m)
-    #   Lane D y=5.5 : H=0.05 m, W=0.35 m, 10 steps, half_w=0.90, platform_len=2.2 (top=0.50 m)
-    #
-    # [box] random obstacles (uniform samples)
-    #   full xy edges [0.15, 0.45] m, height [0.03, 0.12] m
-    #   zones: L n=18 x[0.2,1.3] y[-5.5,-3.8] | R n=14 x[0.2,1.3] y[3.8,5.0]
-    #          Far n=25 x[12,16] y[-2,2]
-    #
-    # [hfield] rough patches (size = rx, ry, elev, base; footprint 2*rx x 2*ry)
-    #   main  rx=3.2 ry=2.2 elev=0.16 base=0.02 @ (14.5, 0.0)
-    #   north rx=2.0 ry=1.6 elev=0.10 base=0.02 @ (13.0, 3.8)
-    #   south rx=2.2 ry=1.5 elev=0.14 base=0.02 @ (15.5,-3.5)
-    #   far   rx=2.5 ry=2.0 elev=0.20 base=0.02 @ (18.5, 1.0)
-    #   PNG 256x256 multi-octave noise + bumps/pits (seed + offset)
-    #
+    # Training match:
+    #   difficulty = level / 10
+    #   step_height = 0.05 + 0.18 * difficulty
+    #   step_width  = 0.31
+    #   platform    = 3.0
     parser = argparse.ArgumentParser(
-        description="Generate scene_1 mixed stairs + rough terrain MJCF"
+        description="Generate curriculum stairs MJCF scenes (scene_stairs_L0..L9)"
     )
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--out", type=str, default=str(OUT_XML))
+    parser.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help=f"Generate a single level in [0, {NUM_ROWS}). Default: all levels.",
+    )
     args = parser.parse_args()
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build_scene(seed=args.seed))
-    # Clean obsolete root-level copies if present.
-    for name in (
-        "scene_stairs_mixed.xml",
-        "rough_hfield.png",
-        "rough_hfield_n.png",
-        "rough_hfield_s.png",
-        "rough_hfield_far.png",
-    ):
-        old = MCJF / name
-        if old.is_file():
-            old.unlink()
-    print(f"Wrote {out}")
-    print(f"Wrote rough hfields under {SCENE_DIR}")
+
+    levels = [args.level] if args.level is not None else list(range(NUM_ROWS))
+    for level in levels:
+        out_dir = generate_level(level)
+        d = difficulty_for_level(level)
+        h = step_height_for_difficulty(d)
+        print(
+            f"Wrote {out_dir}/scene.xml  "
+            f"(level={level} difficulty={d:.2f} H={h:.4f}m W={STEP_WIDTH}m)"
+        )
+
+    write_index_readme(MCJF / "STAIRS_DIFFICULTY.md")
+    print(f"Wrote {MCJF / 'STAIRS_DIFFICULTY.md'}")
 
 
 if __name__ == "__main__":
