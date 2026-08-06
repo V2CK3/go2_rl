@@ -1,5 +1,6 @@
-<mujoco model="go2 scene">
-  <include file="go2.xml"/>
+<mujoco model="go2 scene_0 flat">
+  <include file="../go2.xml"/>
+  <compiler meshdir="../assets"/>
 
   <statistic center="0 0 0.1" extent="0.8"/>
 
@@ -20,5 +21,4 @@
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
   </worldbody>
-  
 </mujoco>
