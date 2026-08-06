@@ -1,4 +1,4 @@
-"""Go2 stairs MuJoCo sim2sim (scene_1 mixed stairs, 45-D obs, no gait phase)."""
+"""Go2 stairs MuJoCo sim2sim (45-D obs, no gait phase)."""
 
 import math
 import os
@@ -28,9 +28,7 @@ from utils import (  # noqa: E402
 LEGGED_GYM_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 FOOT_GEOM_NAMES = ('FL', 'FR', 'RL', 'RR')
 FOOT_BODY_NAMES = ('FL_calf', 'FR_calf', 'RL_calf', 'RR_calf')
-SCENE_XML = os.path.join(
-    LEGGED_GYM_ROOT_DIR, 'resources', 'robots', 'go2', 'MCJF', 'scene_1', 'scene.xml'
-)
+MCJF_DIR = os.path.join(LEGGED_GYM_ROOT_DIR, 'resources', 'robots', 'go2', 'MCJF')
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +251,9 @@ def main():
     experiment = 'go2_stairs'
     run = None                    # e.g. '2026-08-06_09-39-51_stairs' or None
     policy = None                 # e.g. '/path/to/policy_1.pt' or None -> default export
+    # Scene: scene_0 | scene_stairs_L0..L9 | scene_1 | scene_2
+    # See MCJF/STAIRS_DIFFICULTY.md (L1 ≈ 6.8 cm). Prefer L0–L3 for current policies.
+    mujoco_model_path = os.path.join(MCJF_DIR, 'scene_stairs_L1', 'scene.xml')
     # --------------------------------------------
 
     load_model = policy or os.path.join(
@@ -264,7 +265,6 @@ def main():
         run_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', experiment, run)
         plot_dir = os.path.join(run_dir, 'sim2sim')
         os.makedirs(run_dir, exist_ok=True)
-
 
     class Sim2simCfg:
         class env:
@@ -290,7 +290,7 @@ def main():
             clip_actions = 100.
 
         class sim_config:
-            mujoco_model_path = SCENE_XML
+            mujoco_model_path = mujoco_model_path
             sim_duration = 120.0
             dt = 0.005
             decimation = 4
