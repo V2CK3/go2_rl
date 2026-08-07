@@ -488,6 +488,7 @@ class Logger:
         dpi: int = 150,
         run_name: Optional[str] = None,
         iteration: Optional[int] = None,
+        prefix: str = "play",
         suptitle: Optional[str] = None,
     ) -> Optional[str]:
         """Plot logged robot states (shared by play / sim2sim)."""
@@ -498,7 +499,7 @@ class Logger:
 
         if suptitle is None and (run_name is not None or iteration is not None):
             run_txt = run_name if run_name is not None else "?"
-            iter_txt = str(iteration) if iteration is not None else "?"
+            iter_txt = str(iteration) if iteration is not None else "exported"
             suptitle = f"run={run_txt}  |  iter={iter_txt}"
 
         fig = build_state_figure(log, self.dt, foot_labels=foot_labels, suptitle=suptitle)
@@ -510,8 +511,8 @@ class Logger:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             if filename is None:
                 run_part = (run_name or "unknown").replace(os.sep, "_")
-                iter_part = f"iter{iteration}" if iteration is not None else "iter?"
-                filename = f"play_{run_part}_{iter_part}_{stamp}.png"
+                iter_part = f"iter{iteration}" if iteration is not None else "exported"
+                filename = f"{prefix}_{run_part}_{iter_part}_{stamp}.png"
             saved_path = save_figure(fig, save_dir, filename, dpi=dpi, layout=False)
             fig = None
 

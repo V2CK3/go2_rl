@@ -17,7 +17,7 @@ class Go2StairsCfg(BaseConfig):
         num_actions = 12
         env_spacing = 3.
         send_timeouts = True
-        episode_length_s = 20
+        episode_length_s = 16
 
     class safety:
         pos_limit = 1.0
@@ -38,13 +38,15 @@ class Go2StairsCfg(BaseConfig):
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
         selected = False
         terrain_kwargs = None
-        max_init_terrain_level = 5
+        # Start mid-easy so more time is spent climbing L2+ before plateauing.
+        max_init_terrain_level = 3
         terrain_length = 8.
         terrain_width = 8.
         num_rows = 10
         num_cols = 20
         # [smooth slope, rough slope, stairs up, stairs down, discrete]
-        terrain_proportions = [0.15, 0.15, 0.7, 0.0, 0.0]
+        # More stairs-up practice for taller risers (卡脚 mainly on ascent).
+        terrain_proportions = [0.05, 0.05, 0.60, 0.20, 0.1]
         slope_treshold = 0.75
 
     class commands:
@@ -55,25 +57,30 @@ class Go2StairsCfg(BaseConfig):
         heading_command = False
 
         class ranges:
-            lin_vel_x = [-1.0, 1.0]
-            lin_vel_y = [-1.0, 1.0]
-            ang_vel_yaw = [-1, 1]
+            # Cap forward speed a bit: 0.7 + short steps → slam taller risers.
+            lin_vel_x = [-0.3, 0.55]
+            lin_vel_y = [-0.2, 0.2]
+            ang_vel_yaw = [-0.8, 0.8]
             heading = [-3.14, 3.14]
 
     class init_state:
-        pos = [0.0, 0.0, 0.42]
+        # Higher spawn reduces nose-plant on drop-in (prior z=0.42 → front collapse).
+        pos = [0.0, 0.0, 0.45]
         rot = [0.0, 0.0, 0.0, 1.0]
         lin_vel = [0.0, 0.0, 0.0]
         ang_vel = [0.0, 0.0, 0.0]
+        # Keep resets on the flat center platform (~3×3 m); leave margin before risers.
+        xy_spawn_noise = 1.2
         default_joint_angles = {
-            'FL_hip_joint': 0.1,
-            'RL_hip_joint': 0.1,
-            'FR_hip_joint': -0.1,
-            'RR_hip_joint': -0.1,
-            'FL_thigh_joint': 0.8,
-            'RL_thigh_joint': 1.0,
-            'FR_thigh_joint': 0.8,
-            'RR_thigh_joint': 1.0,
+            # Symmetric standing pose: front/rear asymmetry caused nose-down + big rear swing.
+            'FL_hip_joint': 0.0,
+            'RL_hip_joint': 0.0,
+            'FR_hip_joint': 0.0,
+            'RR_hip_joint': 0.0,
+            'FL_thigh_joint': 0.75,
+            'RL_thigh_joint': 0.75,
+            'FR_thigh_joint': 0.75,
+            'RR_thigh_joint': 0.75,
             'FL_calf_joint': -1.5,
             'RL_calf_joint': -1.5,
             'FR_calf_joint': -1.5,
@@ -165,29 +172,56 @@ class Go2StairsCfg(BaseConfig):
     class rewards:
         class scales:
             termination = -0.0
-            tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
-            lin_vel_z = -2.0
-            ang_vel_xy = -0.05
-            orientation = -0.2
-            base_height = -1.0
-            torques = -0.00005
+            tracking_lin_vel = 1.5
+            tracking_ang_vel = 1.2
+            lin_vel_z = -1.0
+            ang_vel_xy = -0.25
+            # Nose-down was chronic (orientation≈-0.65, pitch≈-0.24) — strengthen.
+            orientation = -2.5
+            pitch_forward = -3.0
+            nose_plant = -1.5
+            base_height = -2.5
+            torques = -0.00004
             dof_acc = -1.5e-7
             dof_vel = 0.0
-            collision = -1.
-            action_rate = -0.01
-            feet_air_time = 1.0
-            default_pos = -0.01
+            collision = -1.0
+            action_rate = -0.04
+            # Longer strides (prior air_time≈0.05 → 小碎步); front short hops penalized inside term.
+            feet_air_time = 4.0
+            # Sparse landing clearance — was ~0.03 (too weak for H>8cm risers).
+            feet_clearance = 1.5
+            feet_stumble = -2.5
+            feet_contact_forces = -0.008
+            foot_slip = -0.1
+            drag_gait = -0.35
+            default_hip_pos = -0.6
+            default_pos = -0.12
+            thigh_overflex = -0.8
+            front_rear_thigh_amp = -0.5
+            dof_pos_limits = -1.0
 
         only_positive_rewards = True
+        drag_tracking_scale = 0.6
         tracking_sigma = 0.25
         soft_dof_pos_limit = 0.9
         soft_dof_vel_limit = 1.
         soft_torque_limit = 1.
-        base_height_target = 0.3
-        max_contact_force = 100.
+        base_height_target = 0.35
+        max_contact_force = 120.
         cycle_time = 0.5
-        target_foot_height = 0.2
+        # Need margin over L3–L5 risers (~10–14cm); prior 0.14 barely cleared L0–L1.
+        target_foot_height = 0.16
+        # Below this swing duration counts as scurry (front-leg chatter).
+        min_feet_air_time = 0.08
+        thigh_overflex_threshold = 1.25
+        base_height_clip = 0.25
+        lin_vel_z_clip = 2.0
+        action_rate_clip = 8.0
+        # Easier promote so curriculum can leave the ~L3.5 plateau toward L5+.
+        terrain_track_up_threshold = 0.15
+        terrain_promote_distance_frac = 0.22
+        terrain_demote_distance_frac = 0.12
+        terrain_demote_on_poor_track = False
 
     class normalization:
         class obs_scales:
@@ -254,7 +288,8 @@ class Go2StairsCfgPPO(BaseConfig):
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.01
+        # Prior run noise_std exploded 1→7; lower entropy to keep exploration bounded.
+        entropy_coef = 0.005
         num_learning_epochs = 5
         num_mini_batches = 4
         learning_rate = 1.e-5
@@ -262,8 +297,10 @@ class Go2StairsCfgPPO(BaseConfig):
         gamma = 0.99
         lam = 0.95
         desired_kl = 0.01
+        max_learning_rate = 3.e-4  # prevent adaptive LR from sticking at 1e-2 after collapse
         max_grad_norm = 1.
-        sym_loss = False
+        # Enforce L/R symmetry to stop single-leg splay / unloaded RL stance.
+        sym_loss = True
         obs_permutation = [
             0.0001, -1, -2,
             -3, 4, -5, -6, 7, -8,
@@ -279,8 +316,9 @@ class Go2StairsCfgPPO(BaseConfig):
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 24
-        max_iterations = 30000
-        save_interval = 100
+        max_iterations = 5000
+        save_interval = 200
+        plot_interval = 200
         experiment_name = 'go2_stairs'
         run_name = 'stairs'
         resume = False

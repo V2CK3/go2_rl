@@ -272,6 +272,7 @@ class LeggedRobotCfgPPO(BaseConfig):
 
         # logging
         save_interval = 100 # check for potential saves every this many iterations
+        plot_interval = 200  # export TB curve PNGs every N iters (0 = off unless callback set)
         experiment_name = 'test'
         run_name = ''
         # load and resume

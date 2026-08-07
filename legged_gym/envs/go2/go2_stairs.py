@@ -16,8 +16,85 @@ class Go2Stairs(LeggedRobot):
     def __init__(self, cfg: LeggedRobotCfg, sim_params, physics_engine, sim_device, headless):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
         self.base_height_points = self._init_base_height_points()
+        # Swing-foot lift trackers (stair-aware clearance; sparse credit on landing).
+        nfeet = len(self.feet_indices)
+        self.last_feet_z = torch.zeros(self.num_envs, nfeet, device=self.device)
+        self.feet_air_clearance = torch.zeros(self.num_envs, nfeet, device=self.device)
+        self.prev_foot_contact_clr = torch.zeros(
+            self.num_envs, nfeet, dtype=torch.bool, device=self.device
+        )
         self.reset_idx(torch.tensor(range(self.num_envs), device=self.device))
         self.compute_observations()
+
+    def check_termination(self):
+        """Reset on base contact, bad attitude, or falling through terrain."""
+        super().check_termination()
+        # Side/back on ground: projected gravity z is -1 upright; near 0 or + means tipped.
+        fallen_orient = self.projected_gravity[:, 2] > -0.3
+        # Fell off mesh / through stairs (common cause of "disappear").
+        fallen_height = self.root_states[:, 2] < (self.env_origins[:, 2] - 0.8)
+        # Extreme tumble velocity (sim blow-up).
+        blown = torch.norm(self.root_states[:, 7:10], dim=1) > 8.0
+        self.reset_buf |= fallen_orient | fallen_height | blown
+
+    def _reset_root_states(self, env_ids):
+        """Reset on the flat center platform of each terrain tile (not stacked)."""
+        if self.custom_origins:
+            self.root_states[env_ids] = self.base_init_state
+            self.root_states[env_ids, :3] += self.env_origins[env_ids]
+            # Pyramid stairs platform_size≈3m; keep spawn on the flat middle.
+            xy_noise = getattr(self.cfg.init_state, "xy_spawn_noise", 1.2)
+            n = len(env_ids)
+            # Independent x/y uniform → spread out instead of clustering at origin.
+            self.root_states[env_ids, 0] += torch_rand_float(-xy_noise, xy_noise, (n, 1), device=self.device).squeeze(1)
+            self.root_states[env_ids, 1] += torch_rand_float(-xy_noise, xy_noise, (n, 1), device=self.device).squeeze(1)
+            self.root_states[env_ids, 2] = self.env_origins[env_ids, 2] + self.cfg.init_state.pos[2]
+        else:
+            self.root_states[env_ids] = self.base_init_state
+            self.root_states[env_ids, :3] += self.env_origins[env_ids]
+        if self.cfg.asset.fix_base_link:
+            self.root_states[env_ids, 7:13] = 0
+            self.root_states[env_ids, 2] += 1.8
+        else:
+            self.root_states[env_ids, 7:13] = 0.
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(env_ids_int32),
+            len(env_ids_int32),
+        )
+
+    def _update_terrain_curriculum(self, env_ids):
+        """Terrain curriculum gated by lin-vel tracking (avoid level-up after collapse)."""
+        if not self.init_done:
+            return
+        distance = torch.norm(self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1)
+        # Default 0.3 * length (~2.4m): slower cmds made 0.4*length hard to hit.
+        promote_frac = getattr(self.cfg.rewards, "terrain_promote_distance_frac", 0.3)
+        move_up = distance > self.terrain.env_length * promote_frac
+        # Soft demotion: only if barely left the spawn (harsh 0.5*cmd*T pinned everyone at L0).
+        demote_frac = getattr(self.cfg.rewards, "terrain_demote_distance_frac", 0.12)
+        cmd_xy = torch.norm(self.commands[env_ids, :2], dim=1)
+        move_down = (distance < cmd_xy * self.max_episode_length_s * demote_frac) * ~move_up
+
+        track_scale = self.reward_scales.get("tracking_lin_vel", 0.0)
+        if track_scale > 0 and "tracking_lin_vel" in self.episode_sums:
+            thr = getattr(self.cfg.rewards, "terrain_track_up_threshold", 0.2)
+            track_mean = self.episode_sums["tracking_lin_vel"][env_ids] / self.max_episode_length
+            good_track = track_mean > thr * track_scale
+            move_up = move_up & good_track
+            if getattr(self.cfg.rewards, "terrain_demote_on_poor_track", False):
+                commanded = cmd_xy > 0.1
+                move_down = move_down | ((~good_track) & commanded & ~move_up)
+
+        self.terrain_levels[env_ids] += 1 * move_up - 1 * move_down
+        self.terrain_levels[env_ids] = torch.where(
+            self.terrain_levels[env_ids] >= self.max_terrain_level,
+            torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
+            torch.clip(self.terrain_levels[env_ids], 0),
+        )
+        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
 
     def _get_noise_scale_vec(self, cfg):
         """Noise scales for single-frame actor obs (45-D, no gait phase)."""
@@ -91,6 +168,10 @@ class Go2Stairs(LeggedRobot):
             self.obs_history[i][env_ids] *= 0
         for i in range(self.critic_history.maxlen):
             self.critic_history[i][env_ids] *= 0
+        if hasattr(self, "feet_air_clearance"):
+            self.feet_air_clearance[env_ids] = 0.0
+            self.last_feet_z[env_ids] = self.rigid_state[env_ids][:, self.feet_indices, 2]
+            self.prev_foot_contact_clr[env_ids] = False
 
     def _init_base_height_points(self):
         """Points under the base used for terrain-relative base-height reward."""
@@ -145,7 +226,8 @@ class Go2Stairs(LeggedRobot):
 
     # ================================================ Rewards ================================================== #
     def _reward_lin_vel_z(self):
-        return torch.square(self.base_lin_vel[:, 2])
+        clip = getattr(self.cfg.rewards, "lin_vel_z_clip", 2.0)
+        return torch.square(self.base_lin_vel[:, 2]).clip(max=clip)
 
     def _reward_ang_vel_xy(self):
         return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
@@ -153,9 +235,26 @@ class Go2Stairs(LeggedRobot):
     def _reward_orientation(self):
         return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
 
+    def _reward_pitch_forward(self):
+        """Penalize nose-down pitch only (head low / tail high)."""
+        # Body +x gravity component > 0 when pitched forward.
+        return torch.square(self.projected_gravity[:, 0].clip(min=0.0))
+
+    def _reward_nose_plant(self):
+        """Penalize front-down / rear-up stance (rear feet unloaded while commanded)."""
+        contact = self.contact_forces[:, self.feet_indices, 2] > 5.0
+        # feet_names are sorted: FL, FR, RL, RR
+        front = contact[:, 0] | contact[:, 1]
+        rear = contact[:, 2] | contact[:, 3]
+        moving = torch.norm(self.commands[:, :2], dim=1) > 0.15
+        pitched = self.projected_gravity[:, 0] > 0.12
+        rear_unload = front & (~rear)
+        return ((pitched | rear_unload) & moving).float()
+
     def _reward_base_height(self):
         base_height = self._get_base_heights()
-        return torch.square(base_height - self.cfg.rewards.base_height_target)
+        clip = getattr(self.cfg.rewards, "base_height_clip", 0.25)
+        return torch.square(base_height - self.cfg.rewards.base_height_target).clip(max=clip)
 
     def _reward_torques(self):
         return torch.sum(torch.square(self.torques), dim=1)
@@ -167,7 +266,8 @@ class Go2Stairs(LeggedRobot):
         return torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
 
     def _reward_action_rate(self):
-        return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
+        clip = getattr(self.cfg.rewards, "action_rate_clip", 8.0)
+        return torch.sum(torch.square(self.last_actions - self.actions), dim=1).clip(max=clip)
 
     def _reward_collision(self):
         return torch.sum(
@@ -179,22 +279,120 @@ class Go2Stairs(LeggedRobot):
 
     def _reward_tracking_lin_vel(self):
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
-        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+        rew = torch.exp(-lin_vel_error / self.cfg.rewards.tracking_sigma)
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        dragging = contact.all(dim=1) & (torch.norm(self.commands[:, :2], dim=1) > 0.15)
+        scale = getattr(self.cfg.rewards, "drag_tracking_scale", 0.6)
+        return rew * torch.where(dragging, torch.full_like(rew, scale), torch.ones_like(rew))
 
     def _reward_tracking_ang_vel(self):
         ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
-        return torch.exp(-ang_vel_error / self.cfg.rewards.tracking_sigma)
+        rew = torch.exp(-ang_vel_error / self.cfg.rewards.tracking_sigma)
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        dragging = contact.all(dim=1) & (torch.norm(self.commands[:, :2], dim=1) > 0.15)
+        scale = getattr(self.cfg.rewards, "drag_tracking_scale", 0.6)
+        return rew * torch.where(dragging, torch.full_like(rew, scale), torch.ones_like(rew))
 
     def _reward_default_pos(self):
         return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
 
+    def _reward_default_hip_pos(self):
+        # Penalize hip abduction/adduction away from 0 (indices: FL, FR, RL, RR hips).
+        return (
+            torch.abs(self.dof_pos[:, 0])
+            + torch.abs(self.dof_pos[:, 3])
+            + torch.abs(self.dof_pos[:, 6])
+            + torch.abs(self.dof_pos[:, 9])
+        )
+
+    def _reward_thigh_overflex(self):
+        """Penalize thighs folding past a soft limit into the base (esp. front on drop-in)."""
+        # DOF order: FL/FR/RL/RR × (hip, thigh, calf) → thighs at 1,4,7,10.
+        thighs = self.dof_pos[:, [1, 4, 7, 10]]
+        thr = getattr(self.cfg.rewards, "thigh_overflex_threshold", 1.05)
+        return torch.sum((thighs - thr).clip(min=0.0), dim=1)
+
+    def _reward_front_rear_thigh_amp(self):
+        """Penalize rear thighs swinging much farther from default than front thighs."""
+        front = torch.abs(self.dof_pos[:, [1, 4]] - self.default_dof_pos[:, [1, 4]]).sum(dim=1)
+        rear = torch.abs(self.dof_pos[:, [7, 10]] - self.default_dof_pos[:, [7, 10]]).sum(dim=1)
+        return (rear - front).clip(min=0.0)
+
+    def _reward_dof_pos_limits(self):
+        out_of_limits = -(self.dof_pos - self.dof_pos_limits[:, 0]).clip(max=0.)
+        out_of_limits += (self.dof_pos - self.dof_pos_limits[:, 1]).clip(min=0.)
+        return torch.sum(out_of_limits, dim=1)
+
+    def _reward_feet_stumble(self):
+        # Penalize feet hitting vertical faces (common on stair edges / tip-over).
+        return torch.any(
+            torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2)
+            > 5 * torch.abs(self.contact_forces[:, self.feet_indices, 2]),
+            dim=1,
+        )
+
+    def _reward_feet_clearance(self):
+        """Sparse swing-lift credit on landing (dense per-step swing reward caused rear-high farming)."""
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        foot_z = self.rigid_state[:, self.feet_indices, 2]
+        swing = ~contact
+        delta_z = foot_z - self.last_feet_z
+        self.feet_air_clearance += delta_z.clip(min=0.0) * swing.float()
+        self.last_feet_z = foot_z.clone()
+
+        # One-shot credit when a foot first touches down after swinging.
+        first_contact = contact & (~self.prev_foot_contact_clr) & (self.feet_air_clearance > 0.01)
+        tgt = self.cfg.rewards.target_foot_height
+        peak = (self.feet_air_clearance / tgt).clip(max=1.0)
+        short = (tgt - self.feet_air_clearance).clip(min=0.0, max=0.10) / tgt
+        rew = torch.sum((peak - 0.5 * short) * first_contact.float(), dim=1)
+
+        self.feet_air_clearance = torch.where(
+            contact, torch.zeros_like(self.feet_air_clearance), self.feet_air_clearance
+        )
+        self.prev_foot_contact_clr = contact.clone()
+        moving = torch.norm(self.commands[:, :2], dim=1) > 0.1
+        return rew * moving
+
+    def _reward_feet_contact_forces(self):
+        return torch.sum(
+            (
+                torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+                - self.cfg.rewards.max_contact_force
+            ).clip(min=0.0),
+            dim=1,
+        )
+
+    def _reward_foot_slip(self):
+        """Penalize horizontal foot speed while in contact (anti slide / dog-paddle)."""
+        contact = self.contact_forces[:, self.feet_indices, 2] > 5.0
+        foot_vel_xy = self.rigid_state[:, self.feet_indices, 7:9]
+        slip = torch.norm(foot_vel_xy, dim=2) * contact.float()
+        return torch.sum(slip, dim=1)
+
+    def _reward_drag_gait(self):
+        """Penalize all-four stance while a locomotion command is active."""
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        moving = torch.norm(self.commands[:, :2], dim=1) > 0.15
+        return (contact.all(dim=1) & moving).float()
+
     def _reward_feet_air_time(self):
-        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        """Reward longer strides; little credit for scurrying hops."""
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
         contact_filt = torch.logical_or(contact, self.last_contacts)
+        first_contact = (self.feet_air_time > 0.0) & contact & (~self.last_contacts)
         self.last_contacts = contact
-        first_contact = (self.feet_air_time > 0.) * contact_filt
         self.feet_air_time += self.dt
-        rew_air_time = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1)
-        rew_air_time *= torch.norm(self.commands[:, :2], dim=1) > 0.1
+        min_air = getattr(self.cfg.rewards, "min_feet_air_time", 0.08)
+        # Credit only air beyond scurry threshold (encourages ~0.12–0.30s swings).
+        excess = (self.feet_air_time - min_air).clamp(min=0.0, max=0.25)
+        # Soft penalty for landings shorter than min_air (front feet weighted).
+        short = (min_air - self.feet_air_time).clamp(min=0.0, max=min_air) / min_air
+        w = torch.ones(self.feet_indices.shape[0], device=self.device)
+        w[0:2] = 1.5  # FL, FR
+        rew = torch.sum(
+            (excess - 0.6 * short * w) * first_contact.float(), dim=1
+        )
+        rew *= torch.norm(self.commands[:, :2], dim=1) > 0.1
         self.feet_air_time *= ~contact_filt
-        return rew_air_time
+        return rew
