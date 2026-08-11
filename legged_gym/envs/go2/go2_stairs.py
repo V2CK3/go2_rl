@@ -83,6 +83,12 @@ class Go2Stairs(LeggedRobot):
             thr = getattr(self.cfg.rewards, "terrain_track_up_threshold", 0.2)
             track_mean = self.episode_sums["tracking_lin_vel"][env_ids] / self.max_episode_length
             good_track = track_mean > thr * track_scale
+            # Require yaw tracking too — distance alone rewards walking off the stair tile.
+            ang_scale = self.reward_scales.get("tracking_ang_vel", 0.0)
+            if ang_scale > 0 and "tracking_ang_vel" in self.episode_sums:
+                ang_thr = getattr(self.cfg.rewards, "terrain_ang_track_up_threshold", 0.12)
+                ang_mean = self.episode_sums["tracking_ang_vel"][env_ids] / self.max_episode_length
+                good_track = good_track & (ang_mean > ang_thr * ang_scale)
             move_up = move_up & good_track
             if getattr(self.cfg.rewards, "terrain_demote_on_poor_track", False):
                 commanded = cmd_xy > 0.1
@@ -265,9 +271,31 @@ class Go2Stairs(LeggedRobot):
     def _reward_dof_acc(self):
         return torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
 
+    def _reward_calf_acc(self):
+        """Extra penalty on calf joint acceleration (play 小腿高频抖动)."""
+        # DOF order: FL/FR/RL/RR × (hip, thigh, calf) → calves at 2,5,8,11.
+        acc = (self.last_dof_vel - self.dof_vel) / self.dt
+        return torch.sum(torch.square(acc[:, [2, 5, 8, 11]]), dim=1)
+
     def _reward_action_rate(self):
         clip = getattr(self.cfg.rewards, "action_rate_clip", 8.0)
         return torch.sum(torch.square(self.last_actions - self.actions), dim=1).clip(max=clip)
+
+    def _reward_action_smoothness(self):
+        """Penalize second-order action jerk (anti bang-bang chatter)."""
+        clip = getattr(self.cfg.rewards, "action_smoothness_clip", 8.0)
+        return torch.sum(
+            torch.square(self.actions - 2.0 * self.last_actions + self.last_last_actions),
+            dim=1,
+        ).clip(max=clip)
+
+    def _reward_lin_vel_smooth(self):
+        """Penalize forward base-velocity jerk (stop-go / 一阵一阵)."""
+        last_lin = quat_rotate_inverse(self.base_quat, self.last_root_vel[:, 0:3])
+        dvx = (self.base_lin_vel[:, 0] - last_lin[:, 0]) / self.dt
+        moving = torch.abs(self.commands[:, 0]) > 0.2
+        clip = getattr(self.cfg.rewards, "lin_vel_smooth_clip", 40.0)
+        return (torch.square(dvx) * moving.float()).clip(max=clip)
 
     def _reward_collision(self):
         return torch.sum(
@@ -331,6 +359,20 @@ class Go2Stairs(LeggedRobot):
             dim=1,
         )
 
+    def _sample_terrain_height_xy(self, pos_xy: torch.Tensor) -> torch.Tensor:
+        """Sample heightfield at world XY. pos_xy: (N, K, 2) → (N, K)."""
+        if self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros(pos_xy.shape[:2], device=self.device, dtype=torch.float)
+        scale = self.terrain.cfg.horizontal_scale
+        border = self.terrain.cfg.border_size
+        px = ((pos_xy[..., 0] + border) / scale).long()
+        py = ((pos_xy[..., 1] + border) / scale).long()
+        px = torch.clip(px, 0, self.height_samples.shape[0] - 2)
+        py = torch.clip(py, 0, self.height_samples.shape[1] - 2)
+        h = torch.minimum(self.height_samples[px, py], self.height_samples[px + 1, py])
+        h = torch.minimum(h, self.height_samples[px, py + 1])
+        return h.float() * self.terrain.cfg.vertical_scale
+
     def _reward_feet_clearance(self):
         """Sparse swing-lift credit on landing (dense per-step swing reward caused rear-high farming)."""
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
@@ -354,6 +396,29 @@ class Go2Stairs(LeggedRobot):
         moving = torch.norm(self.commands[:, :2], dim=1) > 0.1
         return rew * moving
 
+    def _reward_feet_clearance_terrain(self):
+        """Penalize swing feet too close to local / ahead terrain (L3+ riser clearance)."""
+        if self.cfg.terrain.mesh_type not in ("trimesh", "heightfield"):
+            return torch.zeros(self.num_envs, device=self.device)
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        swing = (~contact).float()
+        foot_pos = self.rigid_state[:, self.feet_indices, :3]
+        forward = quat_apply(self.base_quat, self.forward_vec)
+        # Probe at foot and slightly ahead (next riser lip).
+        look = getattr(self.cfg.rewards, "clearance_look_ahead", 0.10)
+        margin = getattr(self.cfg.rewards, "clearance_terrain_margin", 0.04)
+        xy0 = foot_pos[..., :2]
+        xy1 = xy0 + look * forward[:, None, :2]
+        h = torch.maximum(
+            self._sample_terrain_height_xy(xy0),
+            self._sample_terrain_height_xy(xy1),
+        )
+        # Positive when foot is below terrain+margin while swinging → clip to penalty.
+        gap = (h + margin) - foot_pos[..., 2]
+        short = gap.clip(min=0.0, max=0.12) * swing
+        moving = torch.norm(self.commands[:, :2], dim=1) > 0.1
+        return torch.sum(short, dim=1) * moving
+
     def _reward_feet_contact_forces(self):
         return torch.sum(
             (
@@ -370,10 +435,87 @@ class Go2Stairs(LeggedRobot):
         slip = torch.norm(foot_vel_xy, dim=2) * contact.float()
         return torch.sum(slip, dim=1)
 
+    def _resample_commands(self, env_ids):
+        """Resample cmds; keep ||v_xy|| above deadzone; bias straight (match play/sim2sim)."""
+        super()._resample_commands(env_ids)
+        if len(env_ids) == 0:
+            return
+        dead = getattr(self.cfg.commands, "deadzone", 0.2)
+        # Re-draw tiny cmds (base zeros ||v||<0.2) until they clear the deadzone.
+        for _ in range(4):
+            small = torch.norm(self.commands[env_ids, :2], dim=1) <= dead
+            if not torch.any(small):
+                break
+            ids = env_ids[small]
+            self.commands[ids, 0] = torch_rand_float(
+                self.command_ranges["lin_vel_x"][0],
+                self.command_ranges["lin_vel_x"][1],
+                (len(ids), 1),
+                device=self.device,
+            ).squeeze(1)
+            self.commands[ids, 1] = torch_rand_float(
+                self.command_ranges["lin_vel_y"][0],
+                self.command_ranges["lin_vel_y"][1],
+                (len(ids), 1),
+                device=self.device,
+            ).squeeze(1)
+            self.commands[ids, :2] *= (
+                torch.norm(self.commands[ids, :2], dim=1) > dead
+            ).unsqueeze(1)
+        still_small = torch.norm(self.commands[env_ids, :2], dim=1) <= dead
+        if torch.any(still_small):
+            ids = env_ids[still_small]
+            self.commands[ids, 0] = 0.4
+            self.commands[ids, 1] = 0.0
+
+        # Most play/sim2sim runs use vy=0, yaw=0 — train that case heavily.
+        p_straight = getattr(self.cfg.commands, "straight_command_prob", 0.7)
+        straight = torch.rand(len(env_ids), device=self.device) < p_straight
+        if torch.any(straight):
+            ids = env_ids[straight]
+            self.commands[ids, 1] = 0.0
+            self.commands[ids, 2] = 0.0
+
+    def _process_dof_props(self, props, env_id):
+        """Assign absolute joint damping/friction (URDF has ~0; multiply would no-op)."""
+        props = super()._process_dof_props(props, env_id)
+        # Match MuJoCo-like viscous friction for sim2sim robustness (train-side only).
+        if self.cfg.domain_rand.randomize_joint_damping:
+            d = float(self.joint_damping_coeffs[env_id, 0].item())
+            for i in range(len(props)):
+                props["damping"][i] = d
+        if self.cfg.domain_rand.randomize_joint_friction:
+            f = float(self.joint_friction_coeffs[env_id, 0].item())
+            for i in range(len(props)):
+                props["friction"][i] = f
+        return props
+
+    def _reward_commanded_still(self):
+        """Penalize near-zero base speed while a locomotion command is active."""
+        cmd = torch.norm(self.commands[:, :2], dim=1)
+        speed = torch.norm(self.base_lin_vel[:, :2], dim=1)
+        thr = getattr(self.cfg.rewards, "commanded_still_speed", 0.12)
+        return ((cmd > 0.2) & (speed < thr)).float()
+
+    def _reward_uncommanded_yaw(self):
+        """Penalize yaw rate when yaw cmd≈0 (play/sim2sim 机头右偏)."""
+        yaw_thr = getattr(self.cfg.rewards, "uncommanded_yaw_cmd_thr", 0.1)
+        straight = (torch.abs(self.commands[:, 2]) < yaw_thr) & (torch.abs(self.commands[:, 0]) > 0.2)
+        # Square + mild linear term so small drift is still discouraged.
+        yaw = self.base_ang_vel[:, 2]
+        return (torch.square(yaw) + 0.5 * torch.abs(yaw)) * straight.float()
+
+    def _reward_uncommanded_vy(self):
+        """Penalize lateral velocity when vy cmd≈0 (anti side-exit / curve walking)."""
+        vy_thr = getattr(self.cfg.rewards, "uncommanded_vy_cmd_thr", 0.05)
+        straight = (torch.abs(self.commands[:, 1]) < vy_thr) & (torch.abs(self.commands[:, 0]) > 0.2)
+        vy = self.base_lin_vel[:, 1]
+        return (torch.square(vy) + 0.5 * torch.abs(vy)) * straight.float()
+
     def _reward_drag_gait(self):
         """Penalize all-four stance while a locomotion command is active."""
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
-        moving = torch.norm(self.commands[:, :2], dim=1) > 0.15
+        moving = torch.norm(self.commands[:, :2], dim=1) > 0.2
         return (contact.all(dim=1) & moving).float()
 
     def _reward_feet_air_time(self):

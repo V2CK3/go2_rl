@@ -38,15 +38,15 @@ class Go2StairsCfg(BaseConfig):
         measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0., 0.1, 0.2, 0.3, 0.4, 0.5]
         selected = False
         terrain_kwargs = None
-        # Start mid-easy so more time is spent climbing L2+ before plateauing.
-        max_init_terrain_level = 3
+        # max_init=1 + demote pinned everyone at L0 in 18-58-23; start at 2 for L1–L2 practice.
+        max_init_terrain_level = 2
         terrain_length = 8.
         terrain_width = 8.
         num_rows = 10
         num_cols = 20
         # [smooth slope, rough slope, stairs up, stairs down, discrete]
-        # More stairs-up practice for taller risers (卡脚 mainly on ascent).
-        terrain_proportions = [0.05, 0.05, 0.60, 0.20, 0.1]
+        # Bias stairs-up; keep some down for descent robustness.
+        terrain_proportions = [0.05, 0.05, 0.55, 0.25, 0.1]
         slope_treshold = 0.75
 
     class commands:
@@ -55,13 +55,18 @@ class Go2StairsCfg(BaseConfig):
         num_commands = 4
         resampling_time = 5.
         heading_command = False
+        # Base env zeros cmds with ||v_xy||<0.2 — keep samples above this.
+        deadzone = 0.2
 
         class ranges:
-            # Cap forward speed a bit: 0.7 + short steps → slam taller risers.
-            lin_vel_x = [-0.3, 0.55]
-            lin_vel_y = [-0.2, 0.2]
-            ang_vel_yaw = [-0.8, 0.8]
+            # Stay above deadzone so standing cannot farm tracking on cmd=0.
+            lin_vel_x = [0.30, 0.55]
+            lin_vel_y = [-0.08, 0.08]
+            # Keep small; most episodes force yaw=0 in resample (match play/sim2sim).
+            ang_vel_yaw = [-0.20, 0.20]
             heading = [-3.14, 3.14]
+        # Fraction of resamples that force straight cmd (vy=0, yaw=0).
+        straight_command_prob = 0.7
 
     class init_state:
         # Higher spawn reduces nose-plant on drop-in (prior z=0.42 → front collapse).
@@ -141,23 +146,25 @@ class Go2StairsCfg(BaseConfig):
         added_base_com_range = [-0.03, 0.03]
 
         randomize_pd_gains = True
-        stiffness_multiplier_range = [0.9, 1.1]
-        damping_multiplier_range = [0.9, 1.1]
+        # Wider PD rand: MuJoCo/sim2sim effective tracking is softer than nominal Isaac.
+        stiffness_multiplier_range = [0.8, 1.15]
+        damping_multiplier_range = [0.8, 1.2]
 
         randomize_calculated_torque = False
         torque_multiplier_range = [0.8, 1.2]
 
         randomize_motor_zero_offset = True
-        motor_zero_offset_range = [-0.035, 0.035]
+        motor_zero_offset_range = [-0.04, 0.04]
 
-        randomize_joint_friction = False
-        joint_friction_range = [0.01, 1.15]
+        # Milder joint lag: damping∈[0,2] taught bang-bang calf chatter vs sticky DOFs.
+        randomize_joint_friction = True
+        joint_friction_range = [0.0, 0.12]
 
-        randomize_joint_damping = False
-        joint_damping_range = [0.3, 1.5]
+        randomize_joint_damping = True
+        joint_damping_range = [0.0, 1.0]
 
-        randomize_joint_armature = False
-        joint_armature_range = [0.0001, 0.05]
+        randomize_joint_armature = True
+        joint_armature_range = [0.0, 0.015]
 
         add_obs_latency = False
         randomize_obs_motor_latency = False
@@ -173,54 +180,66 @@ class Go2StairsCfg(BaseConfig):
         class scales:
             termination = -0.0
             tracking_lin_vel = 1.5
-            tracking_ang_vel = 1.2
+            tracking_ang_vel = 1.5
             lin_vel_z = -1.0
-            ang_vel_xy = -0.25
-            # Nose-down was chronic (orientation≈-0.65, pitch≈-0.24) — strengthen.
-            orientation = -2.5
-            pitch_forward = -3.0
-            nose_plant = -1.5
-            base_height = -2.5
-            torques = -0.00004
-            dof_acc = -1.5e-7
-            dof_vel = 0.0
-            collision = -1.0
+            ang_vel_xy = -0.30
+            orientation = -2.0
+            pitch_forward = -2.0
+            nose_plant = -1.0
+            base_height = -2.0
+            torques = -0.00005
+            # 18-58-23: stacked jerk/acc penalties zeroed only_positive reward (smoothness→-60).
+            dof_acc = -2.0e-7
+            dof_vel = -1.0e-4
+            calf_acc = -4.0e-7
+            collision = -1.2
             action_rate = -0.04
-            # Longer strides (prior air_time≈0.05 → 小碎步); front short hops penalized inside term.
-            feet_air_time = 4.0
-            # Sparse landing clearance — was ~0.03 (too weak for H>8cm risers).
-            feet_clearance = 1.5
+            action_smoothness = -0.01
+            lin_vel_smooth = -0.008
+            feet_air_time = 4.5
+            feet_clearance = 1.6
+            feet_clearance_terrain = -1.2
             feet_stumble = -2.5
-            feet_contact_forces = -0.008
-            foot_slip = -0.1
-            drag_gait = -0.35
+            feet_contact_forces = -0.01
+            foot_slip = -0.10
+            drag_gait = -0.4
+            commanded_still = -1.5
+            uncommanded_yaw = -1.2
+            uncommanded_vy = -1.0
             default_hip_pos = -0.6
-            default_pos = -0.12
-            thigh_overflex = -0.8
-            front_rear_thigh_amp = -0.5
+            default_pos = -0.08
+            thigh_overflex = -0.6
+            front_rear_thigh_amp = -0.4
             dof_pos_limits = -1.0
 
         only_positive_rewards = True
-        drag_tracking_scale = 0.6
-        tracking_sigma = 0.25
+        drag_tracking_scale = 0.5
+        # 0.14 made tracking too sparse vs penalties; 0.20 still tighter than old 0.25.
+        tracking_sigma = 0.20
         soft_dof_pos_limit = 0.9
         soft_dof_vel_limit = 1.
         soft_torque_limit = 1.
         base_height_target = 0.35
         max_contact_force = 120.
         cycle_time = 0.5
-        # Need margin over L3–L5 risers (~10–14cm); prior 0.14 barely cleared L0–L1.
-        target_foot_height = 0.16
-        # Below this swing duration counts as scurry (front-leg chatter).
+        target_foot_height = 0.14
         min_feet_air_time = 0.08
-        thigh_overflex_threshold = 1.25
+        clearance_terrain_margin = 0.05
+        clearance_look_ahead = 0.10
+        commanded_still_speed = 0.20
+        uncommanded_yaw_cmd_thr = 0.1
+        uncommanded_vy_cmd_thr = 0.05
+        thigh_overflex_threshold = 1.30
         base_height_clip = 0.25
         lin_vel_z_clip = 2.0
-        action_rate_clip = 8.0
-        # Easier promote so curriculum can leave the ~L3.5 plateau toward L5+.
-        terrain_track_up_threshold = 0.15
-        terrain_promote_distance_frac = 0.22
-        terrain_demote_distance_frac = 0.12
+        action_rate_clip = 16.0
+        action_smoothness_clip = 8.0
+        lin_vel_smooth_clip = 40.0
+        # 0.28+demote pinned terrain_level≈0.08; ease promote, demote only by distance.
+        terrain_track_up_threshold = 0.18
+        terrain_ang_track_up_threshold = 0.12
+        terrain_promote_distance_frac = 0.25
+        terrain_demote_distance_frac = 0.10
         terrain_demote_on_poor_track = False
 
     class normalization:
@@ -240,7 +259,8 @@ class Go2StairsCfg(BaseConfig):
 
         class noise_scales:
             dof_pos = 0.01
-            dof_vel = 1.5
+            # High dof_vel noise → reactive PD chatter on calves.
+            dof_vel = 0.8
             lin_vel = 0.1
             ang_vel = 0.2
             gravity = 0.05
@@ -279,7 +299,8 @@ class Go2StairsCfgPPO(BaseConfig):
     runner_class_name = 'OnPolicyRunner'
 
     class policy:
-        init_noise_std = 1.0
+        # Lower exploration noise — std=1 kept high-freq action chatter late in training.
+        init_noise_std = 0.8
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         activation = 'elu'
@@ -310,7 +331,8 @@ class Go2StairsCfgPPO(BaseConfig):
         ]
         act_permutation = [-3, 4, 5, -0.0001, 1, 2, -9, 10, 11, -6, 7, 8]
         frame_stack = 1
-        sym_coef = 1.0
+        # Stronger L/R symmetry → less one-sided right-yaw drift in play/sim2sim.
+        sym_coef = 2.0
 
     class runner:
         policy_class_name = 'ActorCritic'

@@ -290,7 +290,7 @@ def main():
             clip_actions = 100.
 
         class sim_config:
-            mujoco_model_path = mujoco_model_path
+            mujoco_model_path = os.path.join(MCJF_DIR, 'scene_stairs_L1', 'scene.xml')
             sim_duration = 120.0
             dt = 0.005
             decimation = 4
