@@ -67,3 +67,8 @@ __pycache__/
 .github/
 .cursor/
 logs/
+
+# build artifacts
+sim2real_deploy/build/
+sim2real_deploy/bridge/unitree_sdk2/build/
+
