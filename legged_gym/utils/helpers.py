@@ -193,17 +193,17 @@ def get_args():
         args.sim_device += f":{args.sim_device_id}"
     return args
 
-def export_policy_as_jit(actor_critic, path):
-    if hasattr(actor_critic, 'memory_a'):
-        # assumes LSTM: TODO add GRU
+def export_policy_as_jit(actor_critic, path, filename="policy.pt"):
+    """Save actor as TorchScript under path/filename. Returns the saved file path."""
+    os.makedirs(path, exist_ok=True)
+    out = os.path.join(path, filename)
+    if hasattr(actor_critic, "memory_a"):
         exporter = PolicyExporterLSTM(actor_critic)
-        exporter.export(path)
-    else: 
-        os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, 'policy_1.pt')
-        model = copy.deepcopy(actor_critic.actor).to('cpu')
-        traced_script_module = torch.jit.script(model)
-        traced_script_module.save(path)
+        exporter.export(out)
+    else:
+        model = copy.deepcopy(actor_critic.actor).to("cpu")
+        torch.jit.script(model).save(out)
+    return out
 
 
 class PolicyExporterLSTM(torch.nn.Module):
@@ -227,11 +227,9 @@ class PolicyExporterLSTM(torch.nn.Module):
         self.hidden_state[:] = 0.
         self.cell_state[:] = 0.
  
-    def export(self, path):
-        os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, 'policy_lstm_1.pt')
-        self.to('cpu')
-        traced_script_module = torch.jit.script(self)
-        traced_script_module.save(path)
+    def export(self, filepath):
+        os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+        self.to("cpu")
+        torch.jit.script(self).save(filepath)
 
     

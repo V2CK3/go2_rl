@@ -141,11 +141,15 @@ def play(args):
         play_iteration = int(getattr(ppo_runner, "current_learning_iteration", -1))
     print(f"Play checkpoint: run={play_run_name}  iter={play_iteration}")
 
-    # export policy as a jit module (used to run it from C++)
+    play_run_dir = os.path.join(
+        LEGGED_GYM_ROOT_DIR, "logs", train_cfg.runner.experiment_name, play_run_name
+    )
+    # export policy as a jit module: logs/<exp>/<RUNS>/policies/{RUNS}_{iter}.pt
     if EXPORT_POLICY:
-        path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, '0_exported', 'policies')
-        export_policy_as_jit(ppo_runner.alg.actor_critic, path)
-        print('Exported policy as jit script to: ', path)
+        path = os.path.join(play_run_dir, "policies")
+        jit_name = f"{play_run_name}_{play_iteration}.pt"
+        jit_path = export_policy_as_jit(ppo_runner.alg.actor_critic, path, filename=jit_name)
+        print(f"Exported JIT: {jit_path}")
 
     logger = Logger(env_cfg.sim.dt)
     log_robot_index = 0
@@ -195,7 +199,7 @@ def play(args):
                 }
             )
         elif PLOT_STATES and i == stop_log_steps:
-            path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, '0_exported', 'sim2play')
+            path = os.path.join(play_run_dir, 'sim2play')
             # Save only — plt.show() steals focus from Isaac viewer (mouse camera dies).
             saved = logger.plot_states(
                 show=False,

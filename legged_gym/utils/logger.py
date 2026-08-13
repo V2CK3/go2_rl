@@ -99,6 +99,10 @@ def _hide_unused_axes(axs, n_used: int, nrows: int, ncols: int) -> None:
         r, c = divmod(j, ncols)
         axs[r, c].axis("off")
 
+def timestamp_name(when: Optional[datetime] = None) -> str:
+    """PNG name: YYYYMMDD_HHMMSS.png"""
+    return (when or datetime.now()).strftime("%Y%m%d_%H%M%S") + ".png"
+
 def save_figure(
     fig,
     save_dir: str,
@@ -508,11 +512,8 @@ class Logger:
 
         saved_path = None
         if save_dir is not None:
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             if filename is None:
-                run_part = (run_name or "unknown").replace(os.sep, "_")
-                iter_part = f"iter{iteration}" if iteration is not None else "exported"
-                filename = f"{prefix}_{run_part}_{iter_part}_{stamp}.png"
+                filename = timestamp_name()
             saved_path = save_figure(fig, save_dir, filename, dpi=dpi, layout=False)
             fig = None
 

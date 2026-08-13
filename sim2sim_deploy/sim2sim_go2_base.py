@@ -19,6 +19,7 @@ from utils import (  # noqa: E402
     Logger,
     quaternion_to_euler_array,
     resolve_plot_meta,
+    resolve_sim2sim_policy,
     update_eval_results,
 )
 
@@ -168,12 +169,12 @@ def run_mujoco(policy, cfg, *, commander=None, plot_dir=None, run_dir=None, plot
             vx_cmd, vy_cmd, yaw_cmd = commander.command
             q, dq, quat, v, omega, gvec, base_pos, foot_positions = get_obs(data, model)
 
-            if step_i > 0 and step_i % int(1.0 / cfg.sim_config.dt) == 0:
-                print(
-                    f"[t={step_i * cfg.sim_config.dt:5.1f}s] "
-                    f"cmd=({vx_cmd:.2f}, {vy_cmd:.2f}, {yaw_cmd:.2f}) "
-                    f"base_vel=({v[0]:.2f}, {v[1]:.2f}, {omega[2]:.2f})"
-                )
+            # if step_i > 0 and step_i % int(1.0 / cfg.sim_config.dt) == 0:
+            #     print(
+            #         f"[t={step_i * cfg.sim_config.dt:5.1f}s] "
+            #         f"cmd=({vx_cmd:.2f}, {vy_cmd:.2f}, {yaw_cmd:.2f}) "
+            #         f"base_vel=({v[0]:.2f}, {v[1]:.2f}, {omega[2]:.2f})"
+            #     )
 
             if count_lowlevel % cfg.sim_config.decimation == 0:
                 eu_ang = quaternion_to_euler_array(quat)
@@ -253,19 +254,14 @@ def run_mujoco(policy, cfg, *, commander=None, plot_dir=None, run_dir=None, plot
 
 def main():
     experiment = 'go2_base'
-    run = None                    # e.g. '2026-08-01_12-46-35_demo' or None
-    policy = None                 # e.g. '/path/to/policy_1.pt' or None -> default export
+    run = None                    # None = latest exported JIT; or e.g. '2026-08-01_12-46-35_demo'
+    iteration = None              # None = highest iter for that run
+    policy = None                 # explicit jit path; else logs/<exp>/<run>/policies/{run}_{iter}.pt
     # --------------------------------------------
 
-    load_model = policy or os.path.join(
-        LEGGED_GYM_ROOT_DIR, 'logs', experiment, '0_exported', 'policies', 'policy_1.pt'
+    load_model, run_dir, plot_dir = resolve_sim2sim_policy(
+        experiment, run, iteration=iteration, policy=policy,
     )
-    run_dir = None
-    plot_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', experiment, '0_exported', 'sim2sim')
-    if run:
-        run_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', experiment, run)
-        plot_dir = os.path.join(run_dir, 'sim2sim')
-        os.makedirs(run_dir, exist_ok=True)
 
     class Sim2simCfg:
         class env:
