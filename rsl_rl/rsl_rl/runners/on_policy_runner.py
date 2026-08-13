@@ -138,13 +138,13 @@ class OnPolicyRunner:
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
+                self.save(self._checkpoint_path(it))
             if (self.plot_callback is not None and self.plot_interval > 0 and it % self.plot_interval == 0):
                 self.plot_callback(self, it)
             ep_infos.clear()
         
         self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
+        self.save(self._checkpoint_path(self.current_learning_iteration))
         if self.plot_callback is not None and self.log_dir is not None:
             self.plot_callback(self, self.current_learning_iteration)
 
@@ -220,7 +220,13 @@ class OnPolicyRunner:
                                locs['num_learning_iterations'] - locs['it']):.1f}s\n""")
         print(log_string)
 
+    def _checkpoint_path(self, iteration):
+        ckpt_dir = os.path.join(self.log_dir, "model")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        return os.path.join(ckpt_dir, "model_{}.pt".format(iteration))
+
     def save(self, path, infos=None):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         torch.save({
             'model_state_dict': self.alg.actor_critic.state_dict(),
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
