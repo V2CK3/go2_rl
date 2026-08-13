@@ -132,7 +132,10 @@ def play(args):
 
     resume_path = getattr(ppo_runner, "resume_path", None)
     if resume_path:
-        play_run_name = os.path.basename(os.path.dirname(resume_path))
+        ckpt_dir = os.path.dirname(resume_path)
+        if os.path.basename(ckpt_dir) == "model":
+            ckpt_dir = os.path.dirname(ckpt_dir)
+        play_run_name = os.path.basename(ckpt_dir)
         # Prefer filename iter (model_12300.pt); saved dict['iter'] can lag behind.
         m = re.search(r"model_(\d+)\.pt$", os.path.basename(resume_path))
         play_iteration = int(m.group(1)) if m else int(getattr(ppo_runner, "current_learning_iteration", -1))

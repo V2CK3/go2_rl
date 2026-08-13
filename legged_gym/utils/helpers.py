@@ -100,6 +100,24 @@ def parse_sim_params(args, cfg):
 
     return sim_params
 
+def _run_checkpoint_dir(run_dir):
+    """logs/<exp>/<RUNS>/model if it has checkpoints, else the run dir (legacy)."""
+    nested = os.path.join(run_dir, "model")
+    if os.path.isdir(nested) and _list_checkpoints(nested):
+        return nested
+    return run_dir
+
+
+def _list_checkpoints(directory):
+    if not os.path.isdir(directory):
+        return []
+    return [f for f in os.listdir(directory) if f.startswith("model") and f.endswith(".pt")]
+
+
+def _run_has_checkpoints(run_dir):
+    return bool(_list_checkpoints(os.path.join(run_dir, "model")) or _list_checkpoints(run_dir))
+
+
 def get_load_path(root, load_run=-1, checkpoint=-1):
     try:
         runs = os.listdir(root)
@@ -111,10 +129,7 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
             r for r in runs
             if r not in skip_names
             and os.path.isdir(os.path.join(root, r))
-            and any(
-                f.startswith("model") and f.endswith(".pt")
-                for f in os.listdir(os.path.join(root, r))
-            )
+            and _run_has_checkpoints(os.path.join(root, r))
         ]
         if len(runs) == 0:
             raise ValueError("No runs with model_*.pt in this directory: " + root)
@@ -128,16 +143,21 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     else:
         load_run = os.path.join(root, load_run)
 
+    ckpt_dir = _run_checkpoint_dir(load_run)
     if checkpoint==-1:
-        models = [file for file in os.listdir(load_run) if file.startswith("model") and file.endswith(".pt")]
+        models = _list_checkpoints(ckpt_dir)
         models.sort(key=lambda m: '{0:0>15}'.format(m))
         if len(models) == 0:
-            raise ValueError(f"No model_*.pt checkpoints in: {load_run}")
+            raise ValueError(f"No model_*.pt checkpoints in: {ckpt_dir}")
         model = models[-1]
     else:
-        model = "model_{}.pt".format(checkpoint) 
+        model = "model_{}.pt".format(checkpoint)
 
-    load_path = os.path.join(load_run, model)
+    load_path = os.path.join(ckpt_dir, model)
+    if not os.path.isfile(load_path) and ckpt_dir != load_run:
+        legacy = os.path.join(load_run, model)
+        if os.path.isfile(legacy):
+            return legacy
     return load_path
 
 def update_cfg_from_args(env_cfg, cfg_train, args):
