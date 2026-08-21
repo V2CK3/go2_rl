@@ -214,13 +214,13 @@ def resolve_sim2sim_policy(experiment, run, iteration=None, policy=None):
 
 
 class KeyboardCommander:
-    """Velocity command interface: keys 8/2/4/6/7/9 only."""
+    """Velocity command interface: keys i/k/j/l/u/o only."""
 
     HELP = (
         "Controls (focus MuJoCo window):\n"
-        "  8 / 2 : vx+ / vx-\n"
-        "  4 / 6 : vy+ / vy-\n"
-        "  7 / 9 : yaw+ / yaw-"
+        "  i / k : vx+ / vx-\n"
+        "  j / l : vy+ / vy-\n"
+        "  u / o : yaw+ / yaw-"
     )
 
     def __init__(
@@ -232,7 +232,7 @@ class KeyboardCommander:
         vy_max=1.0,
         yaw_max=3.0,
         lin_step=0.3,
-        yaw_step=0.5,
+        yaw_step=0.1,
         verbose=True,
     ):
         self.vx = float(vx)
@@ -245,12 +245,12 @@ class KeyboardCommander:
         self.yaw_step = float(yaw_step)
         self.verbose = verbose
         self._char_map = {
-            '8': self._inc_vx,
-            '2': self._dec_vx,
-            '4': self._inc_vy,
-            '6': self._dec_vy,
-            '7': self._inc_yaw,
-            '9': self._dec_yaw,
+            'i': self._inc_vx,
+            'k': self._dec_vx,
+            'j': self._inc_vy,
+            'l': self._dec_vy,
+            'u': self._inc_yaw,
+            'o': self._dec_yaw,
         }
 
     @property
@@ -282,8 +282,9 @@ class KeyboardCommander:
 
     def on_key(self, keycode):
         try:
-            ch = chr(keycode)
-        except ValueError:
+            # GLFW letter codes are uppercase ASCII (KEY_I=73 → 'I').
+            ch = chr(keycode).lower()
+        except (ValueError, TypeError, OverflowError):
             return
         handler = self._char_map.get(ch)
         if handler is None:

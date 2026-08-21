@@ -120,10 +120,13 @@ def build_obs_base(count_lowlevel, cfg, q, dq, omega, eu_ang, action, vx_cmd, vy
     return obs
 
 
-def run_mujoco(policy, cfg, *, commander=None, plot_dir=None, run_dir=None, plot_run_name=None, plot_iteration=None):
+def run_mujoco(
+    policy, cfg, *, commander=None, plot_dir=None, run_dir=None,
+    plot_run_name=None, plot_iteration=None, plot_states=True,
+):
     commander = commander or KeyboardCommander()
-    if plot_dir is None:
-        raise ValueError('plot_dir is required')
+    if plot_states and plot_dir is None:
+        raise ValueError('plot_dir is required when plot_states=True')
 
     model = mujoco.MjModel.from_xml_path(cfg.sim_config.mujoco_model_path)
     model.opt.timestep = cfg.sim_config.dt
@@ -139,7 +142,7 @@ def run_mujoco(policy, cfg, *, commander=None, plot_dir=None, run_dir=None, plot
     )
 
     count_lowlevel = 1
-    logger = Logger(cfg.sim_config.dt)
+    logger = Logger(cfg.sim_config.dt) if plot_states else None
     stop_state_log = 4000
     max_steps = int(cfg.sim_config.sim_duration / cfg.sim_config.dt)
     np.set_printoptions(formatter={'float': '{:0.4f}'.format})
@@ -152,7 +155,7 @@ def run_mujoco(policy, cfg, *, commander=None, plot_dir=None, run_dir=None, plot
         run_name=plot_run_name,
         iteration=plot_iteration,
         prefix='sim2sim',
-    )
+    ) if plot_states else None
 
     with mujoco.viewer.launch_passive(
         model, data, key_callback=commander.on_key, show_left_ui=True, show_right_ui=True,
@@ -211,42 +214,43 @@ def run_mujoco(policy, cfg, *, commander=None, plot_dir=None, run_dir=None, plot
                 )
             tau = np.clip(tau, -cfg.robot_config.tau_limit, cfg.robot_config.tau_limit)
             data.ctrl[:] = tau
-            applied_tau = data.actuator_force
 
             mujoco.mj_step(model, data)
             viewer.sync()
             count_lowlevel += 1
 
-            contact_z = get_foot_contact_forces_z(model, data)
-            idx = 5
-            dof_pos_target = target_q + cfg.robot_config.default_dof_pos
-            if step_i < stop_state_log:
-                logger.log_states({
-                    'base_vel_x': v[0], 'command_x': vx_cmd,
-                    'base_vel_y': v[1], 'command_y': vy_cmd,
-                    'base_vel_z': v[2],
-                    'base_vel_yaw': omega[2], 'command_yaw': yaw_cmd,
-                    'dof_pos_target': dof_pos_target[idx],
-                    'dof_pos': q[idx], 'dof_vel': dq[idx],
-                    'dof_torque': applied_tau[idx], 'cmd_dof_torque': tau[idx],
-                    'contact_forces_z': contact_z.copy(),
-                    **{f'dof_pos_target[{i}]': dof_pos_target[i].item() for i in range(12)},
-                    **{f'dof_pos[{i}]': q[i].item() for i in range(12)},
-                    **{f'dof_torque[{i}]': applied_tau[i].item() for i in range(12)},
-                    **{f'dof_vel[{i}]': dq[i].item() for i in range(12)},
-                })
-            elif step_i == stop_state_log:
-                plot_path = logger.plot_states(**plot_kwargs)
-                if run_dir and plot_path:
-                    update_eval_results(run_dir, plot_path, logger.compute_tracking_metrics())
-                plots_saved = True
+            if plot_states:
+                applied_tau = data.actuator_force
+                contact_z = get_foot_contact_forces_z(model, data)
+                idx = 5
+                dof_pos_target = target_q + cfg.robot_config.default_dof_pos
+                if step_i < stop_state_log:
+                    logger.log_states({
+                        'base_vel_x': v[0], 'command_x': vx_cmd,
+                        'base_vel_y': v[1], 'command_y': vy_cmd,
+                        'base_vel_z': v[2],
+                        'base_vel_yaw': omega[2], 'command_yaw': yaw_cmd,
+                        'dof_pos_target': dof_pos_target[idx],
+                        'dof_pos': q[idx], 'dof_vel': dq[idx],
+                        'dof_torque': applied_tau[idx], 'cmd_dof_torque': tau[idx],
+                        'contact_forces_z': contact_z.copy(),
+                        **{f'dof_pos_target[{i}]': dof_pos_target[i].item() for i in range(12)},
+                        **{f'dof_pos[{i}]': q[i].item() for i in range(12)},
+                        **{f'dof_torque[{i}]': applied_tau[i].item() for i in range(12)},
+                        **{f'dof_vel[{i}]': dq[i].item() for i in range(12)},
+                    })
+                elif step_i == stop_state_log:
+                    plot_path = logger.plot_states(**plot_kwargs)
+                    if run_dir and plot_path:
+                        update_eval_results(run_dir, plot_path, logger.compute_tracking_metrics())
+                    plots_saved = True
 
             step_i += 1
             time_until_next = model.opt.timestep - (time.time() - step_start)
             if time_until_next > 0:
                 time.sleep(time_until_next)
 
-        if (not plots_saved) and logger.num_state_steps() > 0:
+        if plot_states and (not plots_saved) and logger.num_state_steps() > 0:
             plot_path = logger.plot_states(**plot_kwargs)
             if run_dir and plot_path:
                 update_eval_results(run_dir, plot_path, logger.compute_tracking_metrics())
@@ -257,6 +261,7 @@ def main():
     run = None                    # None = latest exported JIT; or e.g. '2026-08-01_12-46-35_demo'
     iteration = None              # None = highest iter for that run
     policy = None                 # explicit jit path; else logs/<exp>/<run>/policies/{run}_{iter}.pt
+    plot_states = True            # False = play only, skip logging / curves / eval_results
     # --------------------------------------------
 
     load_model, run_dir, plot_dir = resolve_sim2sim_policy(
@@ -302,17 +307,21 @@ def main():
 
     print(f"Loading policy: {load_model}")
     print(f"MuJoCo model: {Sim2simCfg.sim_config.mujoco_model_path}")
-    print(f"Plot dir: {plot_dir}")
+    print(f"Plot states: {plot_states}")
+    if plot_states:
+        print(f"Plot dir: {plot_dir}")
     if run_dir:
         print(f"Linked run dir: {run_dir}")
 
     policy_jit = load_policy_checked(load_model, Sim2simCfg.env.num_observations)
     plot_run_name, plot_iteration = resolve_plot_meta(experiment, run, load_model)
-    print(f"Plot tag: run={plot_run_name}  iter={plot_iteration if plot_iteration is not None else 'exported'}")
+    if plot_states:
+        print(f"Plot tag: run={plot_run_name}  iter={plot_iteration if plot_iteration is not None else 'exported'}")
     run_mujoco(
         policy_jit, Sim2simCfg(), commander=KeyboardCommander(),
         plot_dir=plot_dir, run_dir=run_dir,
         plot_run_name=plot_run_name, plot_iteration=plot_iteration,
+        plot_states=plot_states,
     )
 
 
