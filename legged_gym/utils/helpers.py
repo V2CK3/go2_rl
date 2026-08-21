@@ -101,9 +101,9 @@ def parse_sim_params(args, cfg):
     return sim_params
 
 def _run_checkpoint_dir(run_dir):
-    """logs/<exp>/<RUNS>/model if it has checkpoints, else the run dir (legacy)."""
+    """Prefer logs/<exp>/<RUNS>/model; fall back to the run dir (legacy)."""
     nested = os.path.join(run_dir, "model")
-    if os.path.isdir(nested) and _list_checkpoints(nested):
+    if os.path.isdir(nested):
         return nested
     return run_dir
 
@@ -118,7 +118,24 @@ def _run_has_checkpoints(run_dir):
     return bool(_list_checkpoints(os.path.join(run_dir, "model")) or _list_checkpoints(run_dir))
 
 
+def _normalize_load_run(load_run):
+    if load_run is None:
+        return -1
+    if isinstance(load_run, str):
+        load_run = load_run.strip()
+        if load_run in ("", "-1"):
+            return -1
+    if load_run == -1:
+        return -1
+    return load_run
+
+
 def get_load_path(root, load_run=-1, checkpoint=-1):
+    load_run = _normalize_load_run(load_run)
+    if isinstance(checkpoint, str):
+        checkpoint = checkpoint.strip()
+        checkpoint = -1 if checkpoint in ("", "-1") else int(checkpoint)
+
     try:
         runs = os.listdir(root)
         #TODO sort by date to handle change of month
@@ -138,14 +155,20 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
         raise
     except Exception:
         raise ValueError("No runs in this directory: " + root)
-    if load_run==-1:
+    if load_run == -1:
         load_run = last_run
     else:
-        load_run = os.path.join(root, load_run)
+        load_run = os.path.join(root, str(load_run).strip())
+
+    if not os.path.isdir(load_run):
+        raise FileNotFoundError(f"Run directory not found: {load_run}")
 
     ckpt_dir = _run_checkpoint_dir(load_run)
-    if checkpoint==-1:
+    if checkpoint == -1:
         models = _list_checkpoints(ckpt_dir)
+        if not models:
+            models = _list_checkpoints(load_run)
+            ckpt_dir = load_run
         models.sort(key=lambda m: '{0:0>15}'.format(m))
         if len(models) == 0:
             raise ValueError(f"No model_*.pt checkpoints in: {ckpt_dir}")
@@ -154,10 +177,11 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
         model = "model_{}.pt".format(checkpoint)
 
     load_path = os.path.join(ckpt_dir, model)
-    if not os.path.isfile(load_path) and ckpt_dir != load_run:
+    if not os.path.isfile(load_path):
         legacy = os.path.join(load_run, model)
         if os.path.isfile(legacy):
             return legacy
+        raise FileNotFoundError(f"Checkpoint not found: {load_path}")
     return load_path
 
 def update_cfg_from_args(env_cfg, cfg_train, args):

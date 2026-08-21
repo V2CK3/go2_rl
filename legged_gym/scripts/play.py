@@ -46,7 +46,7 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
 
     # override some parameters for testing
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 50)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 64)
     # Play: do not time-out healthy robots — only fall/tip/void should reset.
     env_cfg.env.episode_length_s = 1e6
     # Terrain map: keep curriculum layout (difficulty = row/num_rows).
@@ -221,7 +221,8 @@ if __name__ == '__main__':
 
     args = get_args()
     args.task = "go2_stairs"
-    args.load_run = -1       # -1
+    args.load_run = "2026-08-12_19-00-12_stairs"
+    # args.load_run = -1
     args.checkpoint = -1
     # args.num_envs = 
 
