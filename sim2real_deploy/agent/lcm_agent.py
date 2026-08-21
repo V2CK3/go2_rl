@@ -1,4 +1,4 @@
-"""硬件 Agent：组 47 维观测、叠 frame_stack、经 LCM 发 PD（对齐 sim2sim_go2_base）。"""
+"""硬件 Agent：按 DeployCfg 组观测、叠 frame_stack、经 LCM 发 PD。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import lcm
 import numpy as np
 import torch
 
-from sim2real_deploy.agent.deploy_cfg import Go2BaseDeployCfg
+from sim2real_deploy.agent.deploy_cfg import DeployCfg
 from sim2real_deploy.lcm_types.pd_tau_targets_lcmt import pd_tau_targets_lcmt
 
 LCM_URL = "udpm://239.255.76.67:7667?ttl=255"
@@ -20,7 +20,7 @@ lc = lcm.LCM(LCM_URL)
 class LCMAgent:
     """组观测、叠历史、发 PD。get_obs/reset/step 返回含 obs_history 的 dict。"""
 
-    def __init__(self, cfg: Go2BaseDeployCfg, state):
+    def __init__(self, cfg: DeployCfg, state):
         self.deploy_cfg = cfg
         self.cfg = cfg.as_legacy_dict()
         self.state = state
@@ -38,6 +38,17 @@ class LCMAgent:
         self.default_dof_pos = np.asarray(cfg.default_dof_pos, dtype=np.float64)
         self.p_gains = np.full(12, cfg.kp, dtype=np.float64)
         self.d_gains = np.full(12, cfg.kd, dtype=np.float64)
+        expected_single = 47 if cfg.use_gait_phase else 45
+        if cfg.num_single_obs != expected_single:
+            raise ValueError(
+                f"use_gait_phase={cfg.use_gait_phase} expects num_single_obs="
+                f"{expected_single}, got {cfg.num_single_obs}"
+            )
+        layout = "gait47" if cfg.use_gait_phase else "stairs45"
+        print(
+            f"[LCMAgent] layout={layout} single={cfg.num_single_obs} "
+            f"stack={cfg.frame_stack} -> {cfg.num_observations}"
+        )
         print(f"[LCMAgent] kp={cfg.kp} kd={cfg.kd} action_scale={cfg.action_scale}")
         print(f"[LCMAgent] default_dof_pos={self.default_dof_pos}")
 
@@ -98,19 +109,41 @@ class LCMAgent:
 
         cfg = self.deploy_cfg
         scales = cfg.obs_scales
-        t = self.timestep * self.dt
         obs = np.zeros((1, cfg.num_single_obs), dtype=np.float32)
-        phase = (t % cfg.cycle_time) / cfg.cycle_time
-        obs[0, 0] = math.sin(2 * math.pi * phase)
-        obs[0, 1] = math.cos(2 * math.pi * phase)
-        obs[0, 2] = float(self.commands[0]) * scales.lin_vel
-        obs[0, 3] = float(self.commands[1]) * scales.lin_vel
-        obs[0, 4] = float(self.commands[2]) * scales.ang_vel
-        obs[0, 5:8] = np.asarray(self.body_angular_vel, dtype=np.float32) * scales.ang_vel
-        obs[0, 8:11] = np.asarray(eu_ang, dtype=np.float32) * scales.quat
-        obs[0, 11:23] = (np.asarray(self.dof_pos, dtype=np.float32) - np.asarray(cfg.default_dof_pos, dtype=np.float32)) * scales.dof_pos
-        obs[0, 23:35] = np.asarray(self.dof_vel, dtype=np.float32) * scales.dof_vel
-        obs[0, 35:47] = np.asarray(action_np, dtype=np.float32)
+        cmd0 = float(self.commands[0]) * scales.lin_vel
+        cmd1 = float(self.commands[1]) * scales.lin_vel
+        cmd2 = float(self.commands[2]) * scales.ang_vel
+        omega = np.asarray(self.body_angular_vel, dtype=np.float32) * scales.ang_vel
+        rpy = np.asarray(eu_ang, dtype=np.float32) * scales.quat
+        q = (
+            np.asarray(self.dof_pos, dtype=np.float32)
+            - np.asarray(cfg.default_dof_pos, dtype=np.float32)
+        ) * scales.dof_pos
+        dq = np.asarray(self.dof_vel, dtype=np.float32) * scales.dof_vel
+        act = np.asarray(action_np, dtype=np.float32)
+
+        if cfg.use_gait_phase:
+            t = self.timestep * self.dt
+            phase = (t % cfg.cycle_time) / cfg.cycle_time
+            obs[0, 0] = math.sin(2 * math.pi * phase)
+            obs[0, 1] = math.cos(2 * math.pi * phase)
+            obs[0, 2] = cmd0
+            obs[0, 3] = cmd1
+            obs[0, 4] = cmd2
+            obs[0, 5:8] = omega
+            obs[0, 8:11] = rpy
+            obs[0, 11:23] = q
+            obs[0, 23:35] = dq
+            obs[0, 35:47] = act
+        else:
+            obs[0, 0] = cmd0
+            obs[0, 1] = cmd1
+            obs[0, 2] = cmd2
+            obs[0, 3:6] = omega
+            obs[0, 6:9] = rpy
+            obs[0, 9:21] = q
+            obs[0, 21:33] = dq
+            obs[0, 33:45] = act
         obs = np.clip(obs, -cfg.clip_observations, cfg.clip_observations)
         return self._pack(torch.tensor(obs, device=self.device, dtype=torch.float32))
 
@@ -158,6 +191,7 @@ class LCMAgent:
         self.time = time.time()
 
         obs = self.get_obs()
+        tau_est = np.asarray(self.state.tau_est, dtype=np.float64)[self.joint_idxs]
         infos = {
             "joint_pos": self.dof_pos[np.newaxis, :],
             "joint_vel": self.dof_vel[np.newaxis, :],
@@ -168,6 +202,7 @@ class LCMAgent:
             "contact_state": self.contact_state[np.newaxis, :],
             "body_linear_vel_cmd": self.commands[0:2],
             "body_angular_vel_cmd": self.commands[2:3],
+            "tau_est": tau_est[np.newaxis, :],
             "privileged_obs": None,
         }
         self.timestep += 1

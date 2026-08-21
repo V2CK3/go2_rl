@@ -89,6 +89,7 @@ class StateBuilder:
 
         self.init_time = time.time()
         self.received_first_legdata = False
+        self.received_first_rc = False
 
         self.lc.subscribe("state_estimator_data", self._imu_cb)
         self.legdata_state_subscription = self.lc.subscribe("leg_control_data", self._legdata_cb)
@@ -109,8 +110,9 @@ class StateBuilder:
         return self.body_lin_vel
 
     def get_body_angular_vel(self):
+        dt = np.maximum(self.dt_history, 1e-4)
         self.body_ang_vel = self.smoothing_ratio * np.mean(
-            self.deuler_history / self.dt_history, axis=0
+            self.deuler_history / dt, axis=0
         ) + (1 - self.smoothing_ratio) * self.body_ang_vel
         return self.body_ang_vel
 
@@ -155,6 +157,9 @@ class StateBuilder:
         self.euler_prev = np.array(msg.rpy)
 
     def _rc_command_cb(self, channel, data):
+        if not self.received_first_rc:
+            self.received_first_rc = True
+            print(f"First rc_command: {time.time() - self.init_time:.2f}s")
         msg = rc_command_lcmt.decode(data)
         self.left_upper_switch_pressed = (
             (msg.left_upper_switch and not self.left_upper_switch)

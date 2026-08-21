@@ -1,8 +1,8 @@
 """Agent：StateBuilder + LCMAgent + 部署配置。"""
 
-from sim2real_deploy.agent.deploy_cfg import Go2BaseDeployCfg
+from sim2real_deploy.agent.deploy_cfg import Go2BaseDeployCfg, Go2StairsDeployCfg
 
-__all__ = ["Go2BaseDeployCfg", "LCMAgent", "StateBuilder"]
+__all__ = ["Go2BaseDeployCfg", "Go2StairsDeployCfg", "LCMAgent", "StateBuilder"]
 
 
 def __getattr__(name):

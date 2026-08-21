@@ -1,7 +1,8 @@
 """
-go2_base 真机部署配置（与 sim2sim_go2_base / Go2BaseCfg 对齐）。
+真机部署配置。
 
-策略输入维数以本配置为准（与训练 / sim2sim 对齐）。
+go2_base：47 × frame_stack=10，带步态相位（对齐 sim2sim_go2_base）。
+go2_stairs：45 × frame_stack=1，无相位（对齐 sim2sim_go2_stairs / 训练）。
 """
 
 from __future__ import annotations
@@ -20,13 +21,14 @@ class ObsScales:
 
 
 @dataclass
-class Go2BaseDeployCfg:
-    """与 sim2sim_go2_base.Sim2simCfg 同构的部署配置。"""
+class DeployCfg:
+    """共享 PD / 归一化；子类改观测布局与默认站立角。"""
 
     # env
     frame_stack: int = 10
     num_single_obs: int = 47
     num_actions: int = 12
+    use_gait_phase: bool = True
 
     # control
     action_scale: float = 0.25
@@ -36,7 +38,7 @@ class Go2BaseDeployCfg:
     decimation: int = 4
     sim_dt: float = 0.005
 
-    # rewards / gait clock
+    # rewards / gait clock（仅 use_gait_phase=True 时写入观测）
     cycle_time: float = 0.5
 
     # normalization
@@ -110,3 +112,20 @@ class Go2BaseDeployCfg:
             },
             "commands": {"num_commands": 3},
         }
+
+
+@dataclass
+class Go2BaseDeployCfg(DeployCfg):
+    """与 sim2sim_go2_base.Sim2simCfg 同构：47-D × stack 10，默认大腿 0.8。"""
+
+
+@dataclass
+class Go2StairsDeployCfg(DeployCfg):
+    """与 sim2sim_go2_stairs / Go2StairsCfg 同构：45-D、不叠帧、默认大腿 0.75。"""
+
+    frame_stack: int = 1
+    num_single_obs: int = 45
+    use_gait_phase: bool = False
+    default_dof_pos: List[float] = field(
+        default_factory=lambda: [0.0, 0.75, -1.5] * 4
+    )
